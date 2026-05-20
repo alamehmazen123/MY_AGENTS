@@ -5,8 +5,10 @@ Only `python main.py` starts the system.
 from __future__ import annotations
 import asyncio
 import signal
+import socket
 import subprocess
 import sys
+import time
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,6 +36,7 @@ class LifespanManager:
         self._tasks: list[asyncio.Task] = []
         self._recovery = make_recovery_engine(universe, bus)
         self._frontend_proc = None
+        self._frontend_log = None
     
     async def start(self):
         print(f"[main] Starting my_agents PRIS v12.0")
@@ -64,8 +67,7 @@ class LifespanManager:
             print(f"[main] Gateway listening on API:{settings.api_port} WS:{settings.ws_port}")
         
         # 4c. Start frontend dev server
-        self._start_frontend()
-        await asyncio.sleep(2)
+        frontend_ok = await self._start_frontend()
         
         # 5. Start snapshot loop
         self._tasks.append(asyncio.create_task(self._snapshot_loop()))
@@ -78,7 +80,10 @@ class LifespanManager:
         await bus.emit("system.online", {"version": "12.0", "spec": "PRIS"})
         
         # 7. Open browser
-        self._open_edge("http://localhost:5173")
+        if frontend_ok:
+            self._open_edge("http://localhost:5173")
+        else:
+            print("[main] WARNING: Frontend not available — open http://localhost:5173 manually once fixed")
     
     async def _init_cells(self):
         # Import and initialize cells in order: reflex -> runtime -> deliberation -> workspace -> mcp -> evolution -> gateway
@@ -138,33 +143,79 @@ class LifespanManager:
                 self._frontend_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._frontend_proc.kill()
+        if self._frontend_log:
+            self._frontend_log.close()
         await bus.emit("system.offline", {"reason": "shutdown"})
         print("[main] System OFFLINE")
     
-    def _start_frontend(self):
+    async def _start_frontend(self) -> bool:
         frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
         if not (frontend_dir / "package.json").exists():
             print("[main] Frontend not found, skipping")
-            return
+            return False
+
+        # Auto-install dependencies if missing
+        if not (frontend_dir / "node_modules").exists():
+            print("[main] node_modules missing — running npm install...")
+            try:
+                result = subprocess.run(
+                    ["npm", "install"],
+                    cwd=str(frontend_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if result.returncode != 0:
+                    print(f"[main] npm install failed:\n{result.stderr}")
+                    return False
+                print("[main] npm install completed")
+            except FileNotFoundError:
+                print("[main] npm not found. Install Node.js or run 'cd frontend && npm install' manually.")
+                return False
+            except subprocess.TimeoutExpired:
+                print("[main] npm install timed out (>120s)")
+                return False
+
+        log_path = frontend_dir / "dev-server.log"
+        self._frontend_log = open(log_path, "w", encoding="utf-8")
         try:
             if sys.platform == "win32":
                 self._frontend_proc = subprocess.Popen(
                     "npm run dev",
                     cwd=str(frontend_dir),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=self._frontend_log,
+                    stderr=subprocess.STDOUT,
                     shell=True,
                 )
             else:
                 self._frontend_proc = subprocess.Popen(
                     ["npm", "run", "dev"],
                     cwd=str(frontend_dir),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=self._frontend_log,
+                    stderr=subprocess.STDOUT,
                 )
-            print("[main] Frontend dev server starting...")
+            print("[main] Frontend dev server starting (log: frontend/dev-server.log)...")
         except FileNotFoundError:
             print("[main] npm not found, frontend will not start")
+            self._frontend_log.close()
+            return False
+
+        # Wait for Vite to bind
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            if self._port_open("localhost", 5173):
+                print("[main] Frontend ready on http://localhost:5173")
+                return True
+
+        print("[main] Frontend dev server did not start on port 5173 — check frontend/dev-server.log")
+        return False
+
+    def _port_open(self, host: str, port: int) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            return False
 
     def _open_edge(self, url: str):
         print(f"[main] Opening {url} in Microsoft Edge...")
