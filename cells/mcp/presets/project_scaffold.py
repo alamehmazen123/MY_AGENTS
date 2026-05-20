@@ -1,0 +1,1 @@
+def handle(args): return {"preset": "project_scaffold", "args": args}

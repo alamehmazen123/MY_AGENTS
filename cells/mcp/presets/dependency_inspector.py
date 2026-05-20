@@ -1,0 +1,1 @@
+def handle(args): return {"preset": "dependency_inspector", "args": args}

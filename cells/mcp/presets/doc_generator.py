@@ -1,0 +1,1 @@
+def handle(args): return {"preset": "doc_generator", "args": args}

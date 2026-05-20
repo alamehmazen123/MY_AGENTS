@@ -1,0 +1,73 @@
+# ── Python ──────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ── Virtual Environment ─────────────────
+venv/
+ENV/
+env/
+.venv/
+
+# ── Environment Variables ───────────────
+.env
+.env.local
+.env.*.local
+
+# ── IDE ─────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Database ────────────────────────────
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ── Logs ────────────────────────────────
+*.log
+logs/
+
+# ── Frontend ────────────────────────────
+node_modules/
+frontend/dist/
+frontend/build/
+*.tsbuildinfo
+
+# ── Data (except presets) ───────────────
+data/sessions/
+data/logs/
+data/cache/
+data/mcp/uploaded/
+data/mcp/generated/
+
+# ── Testing ─────────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# ── OS ──────────────────────────────────
+Thumbs.db
+desktop.ini

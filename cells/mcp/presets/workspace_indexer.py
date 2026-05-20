@@ -1,0 +1,1 @@
+def handle(args): return {"preset": "workspace_indexer", "args": args}

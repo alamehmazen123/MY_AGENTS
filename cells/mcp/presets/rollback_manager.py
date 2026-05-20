@@ -1,0 +1,1 @@
+def handle(args): return {"preset": "rollback_manager", "args": args}

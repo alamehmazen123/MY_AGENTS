@@ -1,0 +1,1 @@
+def handle(args): return {"preset": "search_ripgrep", "args": args}

@@ -1,0 +1,1 @@
+def handle(args): return {"preset": "git_mcp", "args": args}
