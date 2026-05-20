@@ -11,10 +11,23 @@ import uvicorn
 from kernel.config import settings
 
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful AI coding assistant. Answer precisely and accurately. "
+    "Only respond with relevant information. If you don't know something, say so. "
+    "Never hallucinate features, APIs, or technologies that don't exist."
+)
+
+REVIEW_SYSTEM_PROMPT = (
+    "You are a senior code reviewer. Review the other agent's response carefully. "
+    "Point out bugs, errors, or hallucinations. Provide a corrected, improved answer. "
+    "Be concise but thorough. Never repeat raw JSON or error dumps."
+)
+
+
 class RESTServer:
     """FastAPI REST server."""
-    
-    def __init__(self):
+
+    def __init__(self, gateway=None):
         self.app = FastAPI(title="my_agents PRIS", version="12.0")
         self.app.add_middleware(
             CORSMiddleware,
@@ -23,42 +36,119 @@ class RESTServer:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+        self._gateway = gateway
         self._setup_routes()
         self._setup_static()
         self._server = None
-    
+
     def _setup_routes(self):
         @self.app.get("/health")
         async def health():
             return {"status": "ok", "version": "12.0"}
-        
+
         @self.app.get("/invariants")
         async def invariants():
             from kernel.lattice_verifier import CORE_INVARIANTS
             return {"invariants": CORE_INVARIANTS}
-        
+
+        @self.app.get("/api/models")
+        async def list_models():
+            return await self._list_ollama_models()
+
         @self.app.post("/prompt")
         async def prompt(req: Request):
-            body = await req.json()
-            return {"task_id": "simulated", "status": "queued"}
-    
+            return await self._handle_prompt(req)
+
+        @self.app.post("/api/prompt")
+        async def api_prompt(req: Request):
+            return await self._handle_prompt(req)
+
+    async def _list_ollama_models(self):
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.get(f"{settings.ollama_host}/api/tags")
+                if res.status_code == 200:
+                    data = res.json()
+                    models = [m.get("name", m.get("model", "")) for m in data.get("models", [])]
+                    return {"models": models}
+                return {"models": [], "error": f"HTTP {res.status_code}"}
+        except Exception as e:
+            return {"models": [], "error": str(e)}
+
+    async def _handle_prompt(self, req: Request):
+        import httpx
+        body = await req.json()
+        prompt_text = body.get("prompt", "")
+        model = body.get("model", settings.ollama_default_model)
+        system = body.get("system", DEFAULT_SYSTEM_PROMPT)
+
+        if not prompt_text:
+            return {"error": "empty_prompt", "output": "[Error: empty prompt received]"}
+
+        # Safety: cap prompt length to protect Ollama context window
+        MAX_PROMPT_LEN = 30000
+        if len(prompt_text) > MAX_PROMPT_LEN:
+            prompt_text = prompt_text[:MAX_PROMPT_LEN] + "\n\n[...truncated by backend]"
+
+        try:
+            async with httpx.AsyncClient(timeout=180) as client:
+                payload = {
+                    "model": model,
+                    "prompt": prompt_text,
+                    "stream": False,
+                }
+                if system:
+                    payload["system"] = system
+
+                res = await client.post(
+                    f"{settings.ollama_host}/api/generate",
+                    json=payload,
+                    timeout=180,
+                )
+                if res.status_code != 200:
+                    return {
+                        "error": f"ollama_http_{res.status_code}",
+                        "output": f"Ollama returned HTTP {res.status_code}: {res.text[:500]}",
+                        "model": model,
+                    }
+                data = res.json()
+                response_text = data.get("response", "").strip()
+                if not response_text:
+                    return {
+                        "output": "[Model returned empty response — try again or check Ollama logs]",
+                        "model": model,
+                        "done": data.get("done", False),
+                    }
+                return {
+                    "output": response_text,
+                    "model": model,
+                    "done": data.get("done", False),
+                    "eval_count": data.get("eval_count", 0),
+                }
+        except httpx.ConnectError as e:
+            return {
+                "error": "ollama_not_reachable",
+                "output": f"Cannot connect to Ollama at {settings.ollama_host}. Make sure 'ollama serve' is running.",
+                "model": model,
+            }
+        except Exception as e:
+            return {"error": str(e), "output": f"[Error: {str(e)}]", "model": model}
+
     def _setup_static(self):
         dist_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
         index_html = dist_dir / "index.html"
 
         if index_html.exists():
-            # Serve built static files: /assets from disk, / from index.html
             self.app.mount("/assets", StaticFiles(directory=str(dist_dir / "assets")), name="assets")
 
             @self.app.get("/")
             async def root():
                 return FileResponse(str(index_html))
 
-            # SPA fallback: any unmatched path returns index.html
             @self.app.get("/{full_path:path}")
             async def spa_fallback(full_path: str):
-                # Don't shadow API routes
-                if full_path.startswith(("health", "invariants", "prompt")):
+                if full_path.startswith(("health", "invariants", "prompt", "api/", "assets/")):
                     from fastapi.exceptions import HTTPException
                     raise HTTPException(status_code=404, detail="Not Found")
                 return FileResponse(str(index_html))
@@ -93,7 +183,7 @@ Then restart <code>python kernel/main.py</code>
         config = uvicorn.Config(self.app, host="0.0.0.0", port=settings.api_port, log_level="warning")
         self._server = uvicorn.Server(config)
         asyncio.create_task(self._server.serve())
-    
+
     async def stop(self):
         if self._server:
             self._server.should_exit = True

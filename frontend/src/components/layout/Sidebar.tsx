@@ -1,27 +1,262 @@
+import { useState, useEffect } from 'react'
+import { useSessionStore } from '../../stores/sessionStore'
+import { useSettingsStore } from '../../stores/settingsStore'
+
+const MCP_PRESETS = [
+  { id: 'file_explorer', name: 'File Explorer', desc: 'Browse workspace files' },
+  { id: 'code_analyzer', name: 'Code Analyzer', desc: 'Static analysis & linting' },
+  { id: 'git_mcp', name: 'Git MCP', desc: 'Git operations & history' },
+  { id: 'search_ripgrep', name: 'Search (ripgrep)', desc: 'Fast text search' },
+  { id: 'python_exec', name: 'Python Exec', desc: 'Sandboxed Python execution' },
+  { id: 'terminal_whitelist', name: 'Terminal', desc: 'Whitelisted shell commands' },
+  { id: 'diff_engine', name: 'Diff Engine', desc: 'Compare & patch files' },
+  { id: 'refactor_safe', name: 'Refactor Safe', desc: 'Safe code refactoring' },
+  { id: 'doc_generator', name: 'Doc Generator', desc: 'Auto-generate documentation' },
+  { id: 'dependency_inspector', name: 'Dependency Inspector', desc: 'Analyze dependencies' },
+  { id: 'workspace_indexer', name: 'Workspace Indexer', desc: 'Index project symbols' },
+  { id: 'health_monitor', name: 'Health Monitor', desc: 'System health checks' },
+  { id: 'project_scaffold', name: 'Project Scaffold', desc: 'Generate project templates' },
+  { id: 'rollback_manager', name: 'Rollback Manager', desc: 'Undo changes safely' },
+]
+
 export function Sidebar() {
+  const sessions = useSessionStore((s) => s.sessions)
+  const activeId = useSessionStore((s) => s.activeSessionId)
+  const createSession = useSessionStore((s) => s.createSession)
+  const switchSession = useSessionStore((s) => s.switchSession)
+  const deleteSession = useSessionStore((s) => s.deleteSession)
+
+  const theme = useSettingsStore((s) => s.theme)
+  const agentAModel = useSettingsStore((s) => s.agentAModel)
+  const agentBModel = useSettingsStore((s) => s.agentBModel)
+  const availableModels = useSettingsStore((s) => s.availableModels)
+  const mcpEnabled = useSettingsStore((s) => s.mcpEnabled)
+  const setTheme = useSettingsStore((s) => s.setTheme)
+  const setAgentAModel = useSettingsStore((s) => s.setAgentAModel)
+  const setAgentBModel = useSettingsStore((s) => s.setAgentBModel)
+  const setMcpEnabled = useSettingsStore((s) => s.setMcpEnabled)
+  const fetchModels = useSettingsStore((s) => s.fetchModels)
+
+  const [activeTab, setActiveTab] = useState<'sessions' | 'mcp' | 'settings'>('sessions')
+  const [showGenerateMcp, setShowGenerateMcp] = useState(false)
+  const [mcpDescription, setMcpDescription] = useState('')
+
+  useEffect(() => {
+    fetchModels()
+  }, [fetchModels])
+
+  const enabledCount = Object.values(mcpEnabled).filter(Boolean).length
+
   return (
     <aside className="w-64 bg-[#202123] border-r border-gray-800 flex flex-col">
       <div className="p-3 border-b border-gray-800">
         <h1 className="text-lg font-bold text-white">my_agents PRIS</h1>
         <div className="text-xs text-gray-500 mt-1">v12.0</div>
       </div>
-      <nav className="flex-1 p-2 space-y-1 overflow-auto">
-        <div className="px-3 py-2 rounded-md hover:bg-gray-800 cursor-pointer text-sm text-gray-300 transition-colors">
-          💬 Sessions
-        </div>
-        <div className="px-3 py-2 rounded-md hover:bg-gray-800 cursor-pointer text-sm text-gray-300 transition-colors">
-          🛠 MCP Tools
-        </div>
-        <div className="px-3 py-2 rounded-md hover:bg-gray-800 cursor-pointer text-sm text-gray-300 transition-colors">
-          ⚙️ Settings
-        </div>
-      </nav>
+
+      {/* Tabs */}
+      <div className="flex border-b border-gray-800">
+        {(['sessions', 'mcp', 'settings'] as const).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={`flex-1 py-2 text-xs font-medium capitalize transition-colors ${
+              activeTab === tab
+                ? 'text-white border-b-2 border-blue-500 bg-gray-800'
+                : 'text-gray-500 hover:text-gray-300'
+            }`}
+          >
+            {tab === 'sessions' ? '💬 Sessions' : tab === 'mcp' ? '🛠 MCP' : '⚙️ Settings'}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab Content */}
+      <div className="flex-1 overflow-auto p-2">
+        {/* ── SESSIONS TAB ── */}
+        {activeTab === 'sessions' && (
+          <div className="space-y-1">
+            <button
+              onClick={createSession}
+              className="w-full px-3 py-2 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition-colors mb-2"
+            >
+              + New Session
+            </button>
+            {sessions.map((sess) => (
+              <div
+                key={sess.id}
+                onClick={() => switchSession(sess.id)}
+                className={`group flex items-center justify-between px-3 py-2 rounded-md cursor-pointer text-sm transition-colors ${
+                  sess.id === activeId
+                    ? 'bg-gray-700 text-white'
+                    : 'text-gray-300 hover:bg-gray-800 hover:text-white'
+                }`}
+              >
+                <span className="truncate">{sess.name}</span>
+                {sess.id === activeId && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 flex-shrink-0" />
+                )}
+                {sess.id !== activeId && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      deleteSession(sess.id)
+                    }}
+                    className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 text-xs px-1 transition-opacity"
+                    title="Delete session"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── MCP TAB ── */}
+        {activeTab === 'mcp' && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-gray-500">{enabledCount}/{MCP_PRESETS.length} active</span>
+            </div>
+
+            <button
+              onClick={() => setShowGenerateMcp(!showGenerateMcp)}
+              className="w-full px-3 py-2 rounded-md bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium transition-colors"
+            >
+              ✨ Generate with AI
+            </button>
+
+            {showGenerateMcp && (
+              <div className="space-y-1 p-2 bg-gray-800 rounded border border-gray-700">
+                <textarea
+                  className="w-full bg-gray-900 rounded px-2 py-1 text-xs text-gray-100 border border-gray-700 resize-none"
+                  rows={2}
+                  placeholder="Describe what this MCP should do..."
+                  value={mcpDescription}
+                  onChange={(e) => setMcpDescription(e.target.value)}
+                />
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => {
+                      setMcpDescription('')
+                      setShowGenerateMcp(false)
+                    }}
+                    className="flex-1 px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      // TODO: call backend to generate MCP
+                      alert(`Generate MCP: ${mcpDescription}`)
+                      setMcpDescription('')
+                      setShowGenerateMcp(false)
+                    }}
+                    className="flex-1 px-2 py-1 bg-green-600 hover:bg-green-500 rounded text-xs text-white"
+                  >
+                    Generate
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="border-t border-gray-800 pt-2 space-y-1">
+              {MCP_PRESETS.map((tool) => (
+                <div
+                  key={tool.id}
+                  className="group flex items-center justify-between px-2 py-1.5 rounded hover:bg-gray-800 transition-colors"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-gray-300 truncate">{tool.name}</div>
+                    <div className="text-[10px] text-gray-500 truncate">{tool.desc}</div>
+                  </div>
+                  <button
+                    onClick={() => setMcpEnabled(tool.id, !mcpEnabled[tool.id])}
+                    className={`ml-2 px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                      mcpEnabled[tool.id]
+                        ? 'bg-green-700 text-green-100 hover:bg-green-600'
+                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                    }`}
+                  >
+                    {mcpEnabled[tool.id] ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── SETTINGS TAB ── */}
+        {activeTab === 'settings' && (
+          <div className="space-y-4 p-2">
+            {/* Agent-A Model */}
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Agent-A Model (Reasoner)</label>
+              <select
+                value={agentAModel}
+                onChange={(e) => setAgentAModel(e.target.value)}
+                className="w-full bg-gray-800 text-gray-100 text-sm rounded border border-gray-700 px-2 py-1.5 focus:border-blue-500 focus:outline-none"
+              >
+                {availableModels.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Agent-B Model */}
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Agent-B Model (Reviewer)</label>
+              <select
+                value={agentBModel}
+                onChange={(e) => setAgentBModel(e.target.value)}
+                className="w-full bg-gray-800 text-gray-100 text-sm rounded border border-gray-700 px-2 py-1.5 focus:border-blue-500 focus:outline-none"
+              >
+                {availableModels.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Theme */}
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Theme</label>
+              <div className="flex gap-1">
+                {(['system', 'dark', 'light'] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setTheme(t)}
+                    className={`flex-1 px-2 py-1 rounded text-xs capitalize transition-colors ${
+                      theme === t
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                    }`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="border-t border-gray-800 pt-2">
+              <button
+                onClick={() => fetchModels()}
+                className="w-full px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 text-xs transition-colors"
+              >
+                🔄 Refresh Model List
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="p-3 border-t border-gray-800">
         <div className="text-xs text-gray-500">
           <div className="flex items-center gap-2 mb-1">
             <span className="w-2 h-2 rounded-full bg-green-500" />
             System Online
           </div>
+          <div className="text-gray-600">{sessions.length} session(s)</div>
         </div>
       </div>
     </aside>

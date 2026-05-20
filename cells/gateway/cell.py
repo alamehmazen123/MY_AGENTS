@@ -21,13 +21,15 @@ class GatewayCell(BaseCell):
         self._protocol = None
         self._upload = None
         self._server = None
+        self._runtime = None
+        self._deliberation = None
     
     async def _on_init(self):
         from cells.gateway.rest import RESTServer
         from cells.gateway.websocket import WSServer
         from cells.gateway.protocol import Protocol
         from cells.gateway.upload import UploadHandler
-        self._rest = RESTServer()
+        self._rest = RESTServer(gateway=self)
         self._websocket = WSServer()
         self._protocol = Protocol()
         self._upload = UploadHandler()

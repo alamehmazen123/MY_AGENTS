@@ -110,6 +110,13 @@ class LifespanManager:
             await cell.init()
             CELL_REGISTRY[cell.name] = cell
             print(f"[main] Cell initialized: {cell.name}")
+        
+        # Wire cross-cell references
+        gateway = CELL_REGISTRY.get("gateway")
+        if gateway:
+            gateway._runtime = CELL_REGISTRY.get("runtime")
+            gateway._deliberation = CELL_REGISTRY.get("deliberation")
+            print("[main] Cross-cell references wired")
     
     async def _snapshot_loop(self):
         while not self._shutdown_event.is_set():
