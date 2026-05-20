@@ -17,14 +17,25 @@ class Sandbox:
         self.max_memory_mb = max_memory_mb
         self.max_cpu_sec = max_cpu_sec
     
-    async def run(self, preset: str, args: dict) -> dict:
+    async def run(self, preset: str, args: dict, handler=None) -> dict:
+        if handler is None:
+            return {"error": "preset_handler_missing", "preset": preset}
         try:
-            # Real implementation uses subprocess with rlimit
-            # Simulated for now
-            await asyncio.sleep(0.01)
-            return {"preset": preset, "args": args, "output": f"Executed {preset}", "sandboxed": True}
+            # Execute handler (sync or async)
+            if asyncio.iscoroutinefunction(handler):
+                result = await handler(args)
+            else:
+                # Run sync handler in threadpool to avoid blocking
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(None, handler, args)
+            if not isinstance(result, dict):
+                result = {"output": result}
+            result["preset"] = preset
+            result["sandboxed"] = True
+            return result
         except Exception as e:
-            return {"error": str(e)}
+            import traceback
+            return {"error": str(e), "traceback": traceback.format_exc(), "preset": preset}
     
     def _limit_resources(self):
         if resource:

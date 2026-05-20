@@ -116,6 +116,7 @@ class LifespanManager:
         if gateway:
             gateway._runtime = CELL_REGISTRY.get("runtime")
             gateway._deliberation = CELL_REGISTRY.get("deliberation")
+            gateway._mcp = CELL_REGISTRY.get("mcp")
             print("[main] Cross-cell references wired")
     
     async def _snapshot_loop(self):

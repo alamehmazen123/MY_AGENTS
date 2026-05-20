@@ -1,1 +1,42 @@
-def handle(args): return {"preset": "git_mcp", "args": args}
+"""cells/mcp/presets/git_mcp.py — Git operations."""
+import subprocess
+from pathlib import Path
+from kernel.config import settings
+
+
+def _git_cmd(args: list, cwd: str | None = None) -> dict:
+    try:
+        result = subprocess.run(
+            ["git"] + args, capture_output=True, text=True, timeout=30, cwd=cwd
+        )
+        return {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+    except FileNotFoundError:
+        return {"error": "git_not_found"}
+    except subprocess.TimeoutExpired:
+        return {"error": "git_command_timeout"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def handle(args: dict) -> dict:
+    action = args.get("action", "status")
+    path_str = args.get("path", str(settings.workspace_root))
+    cwd = Path(path_str).expanduser().resolve()
+    workspace = settings.workspace_root.expanduser().resolve()
+    if not (str(cwd).startswith(str(workspace)) or str(cwd).startswith(str(Path.home()))):
+        return {"error": "path_not_allowed"}
+
+    if action == "status":
+        return _git_cmd(["status", "-sb"], str(cwd))
+    elif action == "log":
+        n = args.get("n", 10)
+        return _git_cmd(["log", f"-n{n}", "--oneline"], str(cwd))
+    elif action == "diff":
+        return _git_cmd(["diff"], str(cwd))
+    elif action == "branch":
+        return _git_cmd(["branch", "-a"], str(cwd))
+    elif action == "show":
+        ref = args.get("ref", "HEAD")
+        return _git_cmd(["show", "--stat", ref], str(cwd))
+    else:
+        return {"error": "unknown_action"}

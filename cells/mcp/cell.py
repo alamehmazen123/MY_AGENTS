@@ -45,8 +45,12 @@ class MCPCell(BaseCell):
         if not self._registry.has(preset):
             return {"error": "preset_not_found"}
         
+        handler = self._registry.load(preset)
+        if not handler:
+            return {"error": "preset_load_failed", "preset": preset}
+        
         # Sandbox execution
-        result = await self._sandbox.run(preset, args)
+        result = await self._sandbox.run(preset, args, handler)
         self._supervisor.heartbeat(preset)
         return result
     

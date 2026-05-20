@@ -71,6 +71,10 @@ class RESTServer:
         async def api_prompt(req: Request):
             return await self._handle_prompt(req)
 
+        @self.app.post("/api/mcp/invoke")
+        async def mcp_invoke(req: Request):
+            return await self._mcp_invoke(req)
+
     async def _list_ollama_models(self):
         import httpx
         try:
@@ -144,13 +148,40 @@ class RESTServer:
 
     async def _handle_prompt(self, req: Request):
         import httpx
+        import re
         body = await req.json()
         prompt_text = body.get("prompt", "")
         model = body.get("model", settings.ollama_default_model)
         system = body.get("system", DEFAULT_SYSTEM_PROMPT)
+        context_files = body.get("context_files", [])
 
         if not prompt_text:
             return {"error": "empty_prompt", "output": "[Error: empty prompt received]"}
+
+        # ── Auto-read referenced files via MCP ──
+        file_context = []
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+
+        # 1. Explicit context_files from frontend
+        for fpath in context_files:
+            if mcp_cell:
+                result = await mcp_cell.invoke("file_explorer", {"action": "read", "path": fpath})
+                if "content" in result:
+                    file_context.append(f"--- {result['name']} ---\n{result['content']}\n")
+
+        # 2. Auto-detect file paths in prompt (e.g. src/main.py, config.json)
+        if mcp_cell:
+            detected_paths = re.findall(r'[\w\-./\\]+\.(py|js|ts|tsx|jsx|json|md|txt|yaml|yml|toml|html|css|java|go|rs|c|cpp|h|hpp)', prompt_text)
+            for dp in detected_paths:
+                # Avoid duplicates
+                if dp in context_files:
+                    continue
+                result = await mcp_cell.invoke("file_explorer", {"action": "read", "path": dp})
+                if "content" in result:
+                    file_context.append(f"--- {result['name']} ---\n{result['content']}\n")
+
+        if file_context:
+            prompt_text = "[Attached Files]\n" + "\n".join(file_context) + "\n[User Prompt]\n" + prompt_text
 
         # Safety: cap prompt length to protect Ollama context window
         MAX_PROMPT_LEN = 30000
@@ -200,6 +231,21 @@ class RESTServer:
             }
         except Exception as e:
             return {"error": str(e), "output": f"[Error: {str(e)}]", "model": model}
+
+    async def _mcp_invoke(self, req: Request):
+        body = await req.json()
+        preset = body.get("preset", "")
+        args = body.get("args", {})
+        if not preset:
+            return {"error": "missing_preset"}
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        try:
+            result = await mcp_cell.invoke(preset, args)
+            return result
+        except Exception as e:
+            return {"error": str(e)}
 
     def _setup_static(self):
         dist_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
