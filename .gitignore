@@ -78,8 +78,3 @@ data/snapshots/
 data/dna/
 data/vacuoles/
 data/rollback/
-data/sessions/
-data/logs/
-data/cache/
-data/mcp/uploaded/
-data/mcp/generated/
