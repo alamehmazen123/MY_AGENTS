@@ -15,22 +15,30 @@ export interface AgentState {
   model: string
 }
 
+export interface AttachedFile {
+  name: string
+  content: string
+}
+
 export interface Session {
   id: string
   name: string
   createdAt: number
   agentA: AgentState
   agentB: AgentState
+  attachedFiles: AttachedFile[]
+  workspaceFolder: string
 }
 
 export interface SessionState {
   sessions: Session[]
   activeSessionId: string
-  sendPrompt: (text: string) => void
+  sendPrompt: (text: string, opts?: { files?: AttachedFile[]; folder?: string }) => void
   createSession: () => void
   switchSession: (id: string) => void
   deleteSession: (id: string) => void
   clear: () => void
+  updateSessionModels: () => void
 }
 
 let msgId = 0
@@ -44,7 +52,7 @@ async function callOllama(
   system?: string
 ): Promise<string> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 185_000) // 185s client timeout
+  const timeoutId = setTimeout(() => controller.abort(), 185_000)
   try {
     const res = await fetch('/api/prompt', {
       method: 'POST',
@@ -76,6 +84,32 @@ function truncate(str: string, maxLen: number): string {
   return str.slice(0, maxLen) + '\n\n[...truncated]'
 }
 
+function buildPrompt(text: string, files: AttachedFile[], folder: string): string {
+  const parts: string[] = []
+
+  if (folder) {
+    parts.push(`Workspace: ${folder}\n`)
+  }
+
+  if (files.length > 0) {
+    parts.push('--- Attached Files ---')
+    for (const f of files) {
+      parts.push(`\n[File: ${f.name}]`)
+      if (f.content.startsWith('[Error:') || f.content.startsWith('[Binary')) {
+        parts.push(f.content)
+      } else {
+        parts.push('```')
+        parts.push(truncate(f.content, 8000))
+        parts.push('```')
+      }
+    }
+    parts.push('--- End Files ---\n')
+  }
+
+  parts.push(text)
+  return parts.join('\n')
+}
+
 function makeSession(id: string, name: string): Session {
   const settings = useSettingsStore.getState()
   return {
@@ -92,6 +126,8 @@ function makeSession(id: string, name: string): Session {
       status: 'waiting',
       model: settings.agentBModel,
     },
+    attachedFiles: [],
+    workspaceFolder: '',
   }
 }
 
@@ -124,12 +160,33 @@ export const useSessionStore = create<SessionState>((set, get) => {
       })
     },
 
-    sendPrompt: async (text: string) => {
+    updateSessionModels: () => {
+      const settings = useSettingsStore.getState()
+      set((s) => ({
+        sessions: s.sessions.map((sess) =>
+          sess.id === s.activeSessionId
+            ? {
+                ...sess,
+                agentA: { ...sess.agentA, model: settings.agentAModel },
+                agentB: { ...sess.agentB, model: settings.agentBModel },
+              }
+            : sess
+        ),
+      }))
+    },
+
+    sendPrompt: async (text: string, opts = {}) => {
       const state = get()
       const session = state.sessions.find((s) => s.id === state.activeSessionId)
       if (!session) return
 
       const settings = useSettingsStore.getState()
+      const files = opts.files ?? session.attachedFiles
+      const folder = opts.folder ?? session.workspaceFolder
+
+      // Build the full prompt with file contents
+      const fullPrompt = buildPrompt(text, files, folder)
+
       const userMsg: AgentMessage = {
         id: makeId(),
         role: 'user',
@@ -137,7 +194,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
         timestamp: Date.now(),
       }
 
-      // Update session: Agent-A gets user prompt and goes Working, Agent-B goes Waiting
+      // Update session
       const updatedA: AgentState = {
         ...session.agentA,
         messages: [...session.agentA.messages, userMsg],
@@ -151,14 +208,16 @@ export const useSessionStore = create<SessionState>((set, get) => {
       }
       set((s) => ({
         sessions: s.sessions.map((sess) =>
-          sess.id === s.activeSessionId ? { ...sess, agentA: updatedA, agentB: updatedB } : sess
+          sess.id === s.activeSessionId
+            ? { ...sess, agentA: updatedA, agentB: updatedB, attachedFiles: files, workspaceFolder: folder }
+            : sess
         ),
       }))
 
       // ── Phase 1: Agent-A reasons ──
       const systemA =
-        'You are an expert coding assistant. Answer the user precisely. Only provide factual, accurate information. If unsure, say so.'
-      const responseA = await callOllama(text, settings.agentAModel, systemA)
+        'You are an expert coding assistant. You have access to the attached files and workspace folder shown in the prompt. Read them carefully before answering. Only provide factual, accurate information. If unsure, say so.'
+      const responseA = await callOllama(fullPrompt, settings.agentAModel, systemA)
 
       const aDone: AgentState = {
         ...updatedA,
@@ -178,7 +237,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
         ),
       }))
 
-      // ── Phase 2: Agent-B reviews Agent-A's output ──
+      // ── Phase 2: Agent-B reviews ──
       const truncatedA = truncate(responseA, 4000)
       const reviewPrompt = `You are a senior code reviewer. The user asked:
 

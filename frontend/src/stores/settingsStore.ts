@@ -14,6 +14,7 @@ interface SettingsState {
   setAvailableModels: (models: string[]) => void
   setMcpEnabled: (name: string, enabled: boolean) => void
   fetchModels: () => Promise<void>
+  applyTheme: () => void
 }
 
 const MCP_PRESETS = [
@@ -26,7 +27,14 @@ const MCP_PRESETS = [
 const defaultMcpEnabled: Record<string, boolean> = {}
 MCP_PRESETS.forEach((name) => { defaultMcpEnabled[name] = true })
 
-export const useSettingsStore = create<SettingsState>((set) => ({
+function getSystemTheme(): 'dark' | 'light' {
+  if (typeof window !== 'undefined') {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  }
+  return 'dark'
+}
+
+export const useSettingsStore = create<SettingsState>((set, get) => ({
   theme: 'dark',
   agentAModel: 'deepseek-coder:latest',
   agentBModel: 'qwen2.5-coder:14b',
@@ -38,7 +46,11 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   ],
   mcpEnabled: { ...defaultMcpEnabled },
 
-  setTheme: (theme) => set({ theme }),
+  setTheme: (theme) => {
+    set({ theme })
+    // Defer DOM update to next tick so React doesn't complain during render
+    setTimeout(() => get().applyTheme(), 0)
+  },
   setAgentAModel: (agentAModel) => set({ agentAModel }),
   setAgentBModel: (agentBModel) => set({ agentBModel }),
   setAvailableModels: (availableModels) => set({ availableModels }),
@@ -56,6 +68,19 @@ export const useSettingsStore = create<SettingsState>((set) => ({
       }
     } catch {
       // fallback to defaults
+    }
+  },
+
+  applyTheme: () => {
+    const t = get().theme
+    const effective = t === 'system' ? getSystemTheme() : t
+    const root = document.documentElement
+    if (effective === 'dark') {
+      root.classList.add('dark')
+      root.classList.remove('light')
+    } else {
+      root.classList.remove('dark')
+      root.classList.add('light')
     }
   },
 }))

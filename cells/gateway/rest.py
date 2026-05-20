@@ -55,6 +55,14 @@ class RESTServer:
         async def list_models():
             return await self._list_ollama_models()
 
+        @self.app.post("/api/read-file")
+        async def read_file(req: Request):
+            return await self._read_file(req)
+
+        @self.app.post("/api/list-folder")
+        async def list_folder(req: Request):
+            return await self._list_folder(req)
+
         @self.app.post("/prompt")
         async def prompt(req: Request):
             return await self._handle_prompt(req)
@@ -75,6 +83,64 @@ class RESTServer:
                 return {"models": [], "error": f"HTTP {res.status_code}"}
         except Exception as e:
             return {"models": [], "error": str(e)}
+
+    async def _read_file(self, req: Request):
+        body = await req.json()
+        file_path = body.get("path", "")
+        if not file_path:
+            return {"error": "no_path", "content": ""}
+        try:
+            p = Path(file_path).expanduser().resolve()
+            workspace = settings.workspace_root.expanduser().resolve()
+            # Security: allow reading within workspace or common user dirs
+            allowed = (
+                str(p).startswith(str(workspace))
+                or str(p).startswith(str(Path.home()))
+            )
+            if not allowed:
+                return {"error": "path_not_allowed", "content": ""}
+            if not p.exists():
+                return {"error": "file_not_found", "content": ""}
+            if p.is_dir():
+                return {"error": "is_directory", "content": ""}
+            # Limit file size to ~2MB to avoid context overflow
+            MAX_SIZE = 2 * 1024 * 1024
+            if p.stat().st_size > MAX_SIZE:
+                return {
+                    "error": "file_too_large",
+                    "content": f"[File too large: {p.name} ({p.stat().st_size} bytes)]",
+                }
+            content = p.read_text(encoding="utf-8", errors="replace")
+            return {"content": content, "path": str(p), "name": p.name}
+        except Exception as e:
+            return {"error": str(e), "content": ""}
+
+    async def _list_folder(self, req: Request):
+        body = await req.json()
+        folder_path = body.get("path", "")
+        if not folder_path:
+            return {"error": "no_path", "items": []}
+        try:
+            p = Path(folder_path).expanduser().resolve()
+            workspace = settings.workspace_root.expanduser().resolve()
+            allowed = (
+                str(p).startswith(str(workspace))
+                or str(p).startswith(str(Path.home()))
+            )
+            if not allowed:
+                return {"error": "path_not_allowed", "items": []}
+            if not p.exists() or not p.is_dir():
+                return {"error": "not_a_directory", "items": []}
+            items = []
+            for child in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                items.append({
+                    "name": child.name,
+                    "type": "dir" if child.is_dir() else "file",
+                    "size": child.stat().st_size if child.is_file() else None,
+                })
+            return {"items": items, "path": str(p)}
+        except Exception as e:
+            return {"error": str(e), "items": []}
 
     async def _handle_prompt(self, req: Request):
         import httpx

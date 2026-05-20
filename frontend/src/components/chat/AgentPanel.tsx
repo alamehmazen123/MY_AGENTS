@@ -1,14 +1,16 @@
 import { useSessionStore } from '../../stores/sessionStore'
+import { useSettingsStore } from '../../stores/settingsStore'
 import { MessageBubble } from './MessageBubble'
 
 export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: string; role: string }) {
   const activeId = useSessionStore((s) => s.activeSessionId)
   const session = useSessionStore((s) => s.sessions.find((x) => x.id === activeId))
+  const settingsModel = useSettingsStore((s) => (agent === 'A' ? s.agentAModel : s.agentBModel))
 
   const agentState = agent === 'A' ? session?.agentA : session?.agentB
   const messages = agentState?.messages ?? []
   const status = agentState?.status ?? 'online'
-  const model = agentState?.model ?? ''
+  const model = agentState?.model || settingsModel
 
   const bgColor = agent === 'A' ? 'bg-purple-50' : 'bg-orange-50'
   const textColor = agent === 'A' ? 'text-purple-900' : 'text-orange-900'

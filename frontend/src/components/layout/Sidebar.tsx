@@ -25,6 +25,7 @@ export function Sidebar() {
   const createSession = useSessionStore((s) => s.createSession)
   const switchSession = useSessionStore((s) => s.switchSession)
   const deleteSession = useSessionStore((s) => s.deleteSession)
+  const updateSessionModels = useSessionStore((s) => s.updateSessionModels)
 
   const theme = useSettingsStore((s) => s.theme)
   const agentAModel = useSettingsStore((s) => s.agentAModel)
@@ -36,16 +37,39 @@ export function Sidebar() {
   const setAgentBModel = useSettingsStore((s) => s.setAgentBModel)
   const setMcpEnabled = useSettingsStore((s) => s.setMcpEnabled)
   const fetchModels = useSettingsStore((s) => s.fetchModels)
+  const applyTheme = useSettingsStore((s) => s.applyTheme)
 
   const [activeTab, setActiveTab] = useState<'sessions' | 'mcp' | 'settings'>('sessions')
   const [showGenerateMcp, setShowGenerateMcp] = useState(false)
   const [mcpDescription, setMcpDescription] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
     fetchModels()
-  }, [fetchModels])
+    applyTheme()
+  }, [fetchModels, applyTheme])
 
   const enabledCount = Object.values(mcpEnabled).filter(Boolean).length
+
+  const handleModelAChange = (model: string) => {
+    setAgentAModel(model)
+    updateSessionModels()
+  }
+
+  const handleModelBChange = (model: string) => {
+    setAgentBModel(model)
+    updateSessionModels()
+  }
+
+  const handleThemeChange = (t: 'system' | 'dark' | 'light') => {
+    setTheme(t)
+  }
+
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    await fetchModels()
+    setTimeout(() => setRefreshing(false), 600)
+  }
 
   return (
     <aside className="w-64 bg-[#202123] border-r border-gray-800 flex flex-col">
@@ -148,7 +172,6 @@ export function Sidebar() {
                   </button>
                   <button
                     onClick={() => {
-                      // TODO: call backend to generate MCP
                       alert(`Generate MCP: ${mcpDescription}`)
                       setMcpDescription('')
                       setShowGenerateMcp(false)
@@ -195,7 +218,7 @@ export function Sidebar() {
               <label className="text-xs text-gray-400 block mb-1">Agent-A Model (Reasoner)</label>
               <select
                 value={agentAModel}
-                onChange={(e) => setAgentAModel(e.target.value)}
+                onChange={(e) => handleModelAChange(e.target.value)}
                 className="w-full bg-gray-800 text-gray-100 text-sm rounded border border-gray-700 px-2 py-1.5 focus:border-blue-500 focus:outline-none"
               >
                 {availableModels.map((m) => (
@@ -209,7 +232,7 @@ export function Sidebar() {
               <label className="text-xs text-gray-400 block mb-1">Agent-B Model (Reviewer)</label>
               <select
                 value={agentBModel}
-                onChange={(e) => setAgentBModel(e.target.value)}
+                onChange={(e) => handleModelBChange(e.target.value)}
                 className="w-full bg-gray-800 text-gray-100 text-sm rounded border border-gray-700 px-2 py-1.5 focus:border-blue-500 focus:outline-none"
               >
                 {availableModels.map((m) => (
@@ -225,7 +248,7 @@ export function Sidebar() {
                 {(['system', 'dark', 'light'] as const).map((t) => (
                   <button
                     key={t}
-                    onClick={() => setTheme(t)}
+                    onClick={() => handleThemeChange(t)}
                     className={`flex-1 px-2 py-1 rounded text-xs capitalize transition-colors ${
                       theme === t
                         ? 'bg-blue-600 text-white'
@@ -240,10 +263,11 @@ export function Sidebar() {
 
             <div className="border-t border-gray-800 pt-2">
               <button
-                onClick={() => fetchModels()}
-                className="w-full px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 text-xs transition-colors"
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="w-full px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 text-xs transition-colors disabled:opacity-50"
               >
-                🔄 Refresh Model List
+                {refreshing ? '🔄 Refreshing...' : '🔄 Refresh Model List'}
               </button>
             </div>
           </div>
