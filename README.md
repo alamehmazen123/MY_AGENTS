@@ -11,3 +11,16 @@ Key Features
 📎 File Attachments — Drag, drop, paste files into prompts
 🎨 ChatGPT-Grade UX — Streaming, code blocks, themes, 60fps
 Stack: FastAPI + React/Vite + SQLite + Ollama
+
+how to run:
+# Install dependencies
+pip install -r requirements.txt
+
+# Start the system (single entry point)
+python kernel/main.py
+
+# Run all tests
+python -m pytest tests/ -v
+
+# Start frontend
+cd frontend && npm install && npm run dev
