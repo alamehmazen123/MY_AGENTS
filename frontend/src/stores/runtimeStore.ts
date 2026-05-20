@@ -8,7 +8,7 @@ interface RuntimeState {
 }
 
 export const useRuntimeStore = create<RuntimeState>((set) => ({
-  status: 'idle',
+  status: 'online',
   model: '',
   queueDepth: 0,
   setStatus: (status) => set({ status }),

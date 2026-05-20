@@ -66,8 +66,8 @@ class LifespanManager:
             await gateway.start_servers()
             print(f"[main] Gateway listening on API:{settings.api_port} WS:{settings.ws_port}")
         
-        # 4c. Start frontend dev server
-        frontend_ok = await self._start_frontend()
+        # 4c. Start frontend
+        frontend_url = await self._start_frontend()
         
         # 5. Start snapshot loop
         self._tasks.append(asyncio.create_task(self._snapshot_loop()))
@@ -80,10 +80,12 @@ class LifespanManager:
         await bus.emit("system.online", {"version": "12.0", "spec": "PRIS"})
         
         # 7. Open browser
-        if frontend_ok:
-            self._open_edge("http://localhost:5173")
+        if frontend_url:
+            self._open_edge(frontend_url)
         else:
-            print("[main] WARNING: Frontend not available — open http://localhost:5173 manually once fixed")
+            fallback = f"http://localhost:{settings.api_port}"
+            print(f"[main] WARNING: Frontend not available — opened status page ({fallback})")
+            self._open_edge(fallback)
     
     async def _init_cells(self):
         # Import and initialize cells in order: reflex -> runtime -> deliberation -> workspace -> mcp -> evolution -> gateway
@@ -148,67 +150,112 @@ class LifespanManager:
         await bus.emit("system.offline", {"reason": "shutdown"})
         print("[main] System OFFLINE")
     
-    async def _start_frontend(self) -> bool:
+    def _find_npm(self) -> str | None:
+        import shutil
+        for cmd in ("npm.cmd", "npm"):
+            path = shutil.which(cmd)
+            if path:
+                return path
+        if sys.platform == "win32":
+            try:
+                result = subprocess.run(
+                    ["where", "npm"], capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    lines = result.stdout.strip().splitlines()
+                    if lines:
+                        return lines[0].strip()
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+            for base in (
+                Path.home() / "AppData" / "Roaming" / "npm",
+                Path("C:/Program Files/nodejs"),
+                Path("C:/Program Files (x86)/nodejs"),
+            ):
+                for name in ("npm.cmd", "npm"):
+                    candidate = base / name
+                    if candidate.exists():
+                        return str(candidate)
+        return None
+
+    async def _start_frontend(self) -> str:
+        """Try to start frontend. Returns URL if successful, empty string if not."""
         frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+        print(f"[main] Frontend dir: {frontend_dir}")
+
+        # 1. Prefer pre-built static files (no Node.js needed at runtime)
+        dist_dir = frontend_dir / "dist"
+        if dist_dir.exists():
+            print("[main] Using pre-built frontend from frontend/dist")
+            print(f"[main] UI available at http://localhost:{settings.api_port}")
+            return f"http://localhost:{settings.api_port}"
+
         if not (frontend_dir / "package.json").exists():
             print("[main] Frontend not found, skipping")
-            return False
+            return ""
 
-        # Auto-install dependencies if missing
+        # 2. Find npm
+        npm = self._find_npm()
+        if not npm:
+            print("[main] Node.js/npm not found.")
+            print("[main]   Option A: Install Node.js from https://nodejs.org")
+            print("[main]   Option B: Run 'cd frontend && npm install && npm run build' then restart")
+            return ""
+
+        # 3. Auto-install dependencies if missing
         if not (frontend_dir / "node_modules").exists():
             print("[main] node_modules missing — running npm install...")
             try:
                 result = subprocess.run(
-                    ["npm", "install"],
+                    [npm, "install"],
                     cwd=str(frontend_dir),
                     capture_output=True,
                     text=True,
-                    timeout=120,
+                    timeout=180,
                 )
                 if result.returncode != 0:
                     print(f"[main] npm install failed:\n{result.stderr}")
-                    return False
+                    return ""
                 print("[main] npm install completed")
-            except FileNotFoundError:
-                print("[main] npm not found. Install Node.js or run 'cd frontend && npm install' manually.")
-                return False
             except subprocess.TimeoutExpired:
-                print("[main] npm install timed out (>120s)")
-                return False
+                print("[main] npm install timed out (>180s)")
+                return ""
 
+        # 4. Start Vite dev server
         log_path = frontend_dir / "dev-server.log"
         self._frontend_log = open(log_path, "w", encoding="utf-8")
         try:
-            if sys.platform == "win32":
-                self._frontend_proc = subprocess.Popen(
-                    "npm run dev",
-                    cwd=str(frontend_dir),
-                    stdout=self._frontend_log,
-                    stderr=subprocess.STDOUT,
-                    shell=True,
-                )
-            else:
-                self._frontend_proc = subprocess.Popen(
-                    ["npm", "run", "dev"],
-                    cwd=str(frontend_dir),
-                    stdout=self._frontend_log,
-                    stderr=subprocess.STDOUT,
-                )
+            self._frontend_proc = subprocess.Popen(
+                [npm, "run", "dev"],
+                cwd=str(frontend_dir),
+                stdout=self._frontend_log,
+                stderr=subprocess.STDOUT,
+            )
             print("[main] Frontend dev server starting (log: frontend/dev-server.log)...")
         except FileNotFoundError:
-            print("[main] npm not found, frontend will not start")
+            print("[main] npm disappeared unexpectedly")
             self._frontend_log.close()
-            return False
+            return ""
 
-        # Wait for Vite to bind
-        for _ in range(20):
+        # 5. Wait for Vite to bind
+        for _ in range(30):
             await asyncio.sleep(0.5)
             if self._port_open("localhost", 5173):
                 print("[main] Frontend ready on http://localhost:5173")
-                return True
+                return "http://localhost:5173"
 
-        print("[main] Frontend dev server did not start on port 5173 — check frontend/dev-server.log")
-        return False
+        # Failed — dump log so user sees why
+        print("[main] Frontend dev server did not start on port 5173")
+        self._frontend_log.flush()
+        try:
+            log_content = log_path.read_text(encoding="utf-8")
+            if log_content.strip():
+                print("[main] --- dev-server.log ---")
+                print(log_content[-2000:])  # last 2KB
+                print("[main] --- end log ---")
+        except Exception:
+            pass
+        return ""
 
     def _port_open(self, host: str, port: int) -> bool:
         try:

@@ -80,3 +80,5 @@ data/vacuoles/
 data/rollback/
 data/dna/events.jsonl
 data/debug/events.jsonl
+data/dna/events.jsonl
+
