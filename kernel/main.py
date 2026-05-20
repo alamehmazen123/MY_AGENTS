@@ -5,7 +5,9 @@ Only `python main.py` starts the system.
 from __future__ import annotations
 import asyncio
 import signal
+import subprocess
 import sys
+import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -31,6 +33,7 @@ class LifespanManager:
         self._shutdown_event = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
         self._recovery = make_recovery_engine(universe, bus)
+        self._frontend_proc = None
     
     async def start(self):
         print(f"[main] Starting my_agents PRIS v12.0")
@@ -54,6 +57,16 @@ class LifespanManager:
         # 4. Initialize cells in dependency order
         await self._init_cells()
         
+        # 4b. Start gateway servers
+        gateway = CELL_REGISTRY.get("gateway")
+        if gateway:
+            await gateway.start_servers()
+            print(f"[main] Gateway listening on API:{settings.api_port} WS:{settings.ws_port}")
+        
+        # 4c. Start frontend dev server
+        self._start_frontend()
+        await asyncio.sleep(2)
+        
         # 5. Start snapshot loop
         self._tasks.append(asyncio.create_task(self._snapshot_loop()))
         
@@ -63,6 +76,9 @@ class LifespanManager:
         self.running = True
         print("[main] System ONLINE")
         await bus.emit("system.online", {"version": "12.0", "spec": "PRIS"})
+        
+        # 7. Open browser
+        self._open_edge("http://localhost:5173")
     
     async def _init_cells(self):
         # Import and initialize cells in order: reflex -> runtime -> deliberation -> workspace -> mcp -> evolution -> gateway
@@ -116,9 +132,52 @@ class LifespanManager:
                 pass
         for cell in CELL_REGISTRY.values():
             await cell.shutdown()
+        if self._frontend_proc:
+            self._frontend_proc.terminate()
+            try:
+                self._frontend_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._frontend_proc.kill()
         await bus.emit("system.offline", {"reason": "shutdown"})
         print("[main] System OFFLINE")
     
+    def _start_frontend(self):
+        frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+        if not (frontend_dir / "package.json").exists():
+            print("[main] Frontend not found, skipping")
+            return
+        try:
+            if sys.platform == "win32":
+                self._frontend_proc = subprocess.Popen(
+                    "npm run dev",
+                    cwd=str(frontend_dir),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    shell=True,
+                )
+            else:
+                self._frontend_proc = subprocess.Popen(
+                    ["npm", "run", "dev"],
+                    cwd=str(frontend_dir),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            print("[main] Frontend dev server starting...")
+        except FileNotFoundError:
+            print("[main] npm not found, frontend will not start")
+
+    def _open_edge(self, url: str):
+        print(f"[main] Opening {url} in Microsoft Edge...")
+        if sys.platform == "win32":
+            subprocess.Popen(["cmd", "/c", "start", "msedge", url])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-a", "Microsoft Edge", url])
+        else:
+            try:
+                subprocess.Popen(["microsoft-edge", url])
+            except FileNotFoundError:
+                webbrowser.open(url)
+
     def signal_handler(self, sig):
         print(f"[main] Received signal {sig}")
         asyncio.create_task(self.shutdown())

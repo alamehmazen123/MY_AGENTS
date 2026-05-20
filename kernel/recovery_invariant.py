@@ -37,8 +37,7 @@ class RecoveryEngine:
     async def take_snapshot(self) -> Path:
         snap = self.universe.snapshot()
         import json
-        ts = snap.timestamp.strftime("%Y%m%d_%H%M%S_%f")
-        path = self.snapshot_dir / f"snapshot_{ts}_{snap.checksum}.json"
+        path = self.snapshot_dir / "latest_snapshot.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump({
                 "timestamp": snap.timestamp.isoformat(),
@@ -84,8 +83,9 @@ class RecoveryEngine:
     
     async def _load_last_snapshot(self) -> StateSnapshot:
         import json
-        if self._last_snapshot and self._last_snapshot.exists():
-            with open(self._last_snapshot, "r", encoding="utf-8") as f:
+        path = self.snapshot_dir / "latest_snapshot.json"
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             return StateSnapshot(
                 timestamp=datetime.fromisoformat(raw["timestamp"]),
