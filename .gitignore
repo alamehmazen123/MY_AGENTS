@@ -71,3 +71,5 @@ htmlcov/
 # ── OS ──────────────────────────────────
 Thumbs.db
 desktop.ini
+# Kimi project memory
+.kimi-memory/
