@@ -131,16 +131,24 @@ lifespan = LifespanManager()
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda s=sig: lifespan.signal_handler(s))
-    
+
+    async def _run():
+        # Register Unix signal handlers once loop is running
+        try:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, lambda s=sig: lifespan.signal_handler(s))
+        except NotImplementedError:
+            pass  # Windows ProactorEventLoop — rely on KeyboardInterrupt
+        await lifespan.start()
+        await lifespan._shutdown_event.wait()
+
     try:
-        loop.run_until_complete(lifespan.start())
-        # Keep running until shutdown
-        loop.run_until_complete(lifespan._shutdown_event.wait())
+        loop.run_until_complete(_run())
+    except KeyboardInterrupt:
+        print("[main] KeyboardInterrupt received")
     finally:
-        loop.run_until_complete(lifespan.shutdown())
+        if lifespan.running:
+            loop.run_until_complete(lifespan.shutdown())
         loop.close()
         print("[main] Exited cleanly")
 

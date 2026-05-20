@@ -73,3 +73,13 @@ Thumbs.db
 desktop.ini
 # Kimi project memory
 .kimi-memory/
+# ── DATA (Runtime Generated) ────────────
+data/snapshots/
+data/dna/
+data/vacuoles/
+data/rollback/
+data/sessions/
+data/logs/
+data/cache/
+data/mcp/uploaded/
+data/mcp/generated/
