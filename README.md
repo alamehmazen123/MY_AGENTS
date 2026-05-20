@@ -16,8 +16,9 @@ how to run:
 # Install dependencies
 pip install -r requirements.txt
 
-# Start the system (single entry point)
-python kernel/main.py
+# Start the system (need two terminals)
+1-ollama serve
+2-python kernel/main.py
 
 # Run all tests
 python -m pytest tests/ -v
