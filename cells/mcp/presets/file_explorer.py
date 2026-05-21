@@ -1,18 +1,12 @@
-"""cells/mcp/presets/file_explorer.py — Browse and read workspace files."""
+"""cells/mcp/presets/file_explorer.py — Browse, read, write, and manage any file."""
 from pathlib import Path
-from kernel.config import settings
 
 
-def _validate_path(path_str: str) -> tuple[Path | None, dict | None]:
+def _resolve_path(path_str: str) -> tuple[Path | None, dict | None]:
     if not path_str:
         return None, {"error": "missing_path"}
     try:
         p = Path(path_str).expanduser().resolve()
-        workspace = settings.workspace_root.expanduser().resolve()
-        home = Path.home()
-        allowed = str(p).startswith(str(workspace)) or str(p).startswith(str(home))
-        if not allowed:
-            return None, {"error": "path_not_allowed", "path": str(p)}
         return p, None
     except Exception as e:
         return None, {"error": str(e)}
@@ -21,7 +15,7 @@ def _validate_path(path_str: str) -> tuple[Path | None, dict | None]:
 def handle(args: dict) -> dict:
     action = args.get("action", "read")
     path_str = args.get("path", "")
-    p, err = _validate_path(path_str)
+    p, err = _resolve_path(path_str)
     if err:
         return err
 
@@ -62,7 +56,40 @@ def handle(args: dict) -> dict:
                 "mtime": st.st_mtime,
             }
 
+        elif action == "write":
+            content = args.get("content", "")
+            if not p.parent.exists():
+                p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            return {"success": True, "path": str(p), "bytes_written": len(content.encode("utf-8"))}
+
+        elif action == "delete":
+            if not p.exists():
+                return {"error": "not_found", "path": str(p)}
+            if p.is_dir():
+                import shutil
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+            return {"success": True, "path": str(p)}
+
+        elif action == "mkdir":
+            p.mkdir(parents=True, exist_ok=True)
+            return {"success": True, "path": str(p)}
+
+        elif action == "move":
+            dest_str = args.get("dest", "")
+            if not dest_str:
+                return {"error": "missing_dest"}
+            dest = Path(dest_str).expanduser().resolve()
+            if not dest.parent.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.move(str(p), str(dest))
+            return {"success": True, "src": str(p), "dest": str(dest)}
+
         else:
             return {"error": "unknown_action", "action": action}
     except Exception as e:
-        return {"error": str(e), "path": str(p)}
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc(), "path": str(p)}

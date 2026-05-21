@@ -22,9 +22,6 @@ def handle(args: dict) -> dict:
     action = args.get("action", "status")
     path_str = args.get("path", str(settings.workspace_root))
     cwd = Path(path_str).expanduser().resolve()
-    workspace = settings.workspace_root.expanduser().resolve()
-    if not (str(cwd).startswith(str(workspace)) or str(cwd).startswith(str(Path.home()))):
-        return {"error": "path_not_allowed"}
 
     if action == "status":
         return _git_cmd(["status", "-sb"], str(cwd))

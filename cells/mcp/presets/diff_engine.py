@@ -1,7 +1,6 @@
 """cells/mcp/presets/diff_engine.py — Generate unified diffs."""
 import difflib
 from pathlib import Path
-from kernel.config import settings
 
 
 def handle(args: dict) -> dict:
@@ -23,14 +22,6 @@ def handle(args: dict) -> dict:
         try:
             p_a = Path(path_a).expanduser().resolve()
             p_b = Path(path_b).expanduser().resolve()
-            workspace = settings.workspace_root.expanduser().resolve()
-            allowed = (
-                str(p_a).startswith(str(workspace)) or str(p_a).startswith(str(Path.home()))
-            ) and (
-                str(p_b).startswith(str(workspace)) or str(p_b).startswith(str(Path.home()))
-            )
-            if not allowed:
-                return {"error": "path_not_allowed"}
             a = p_a.read_text(encoding="utf-8", errors="replace")
             b = p_b.read_text(encoding="utf-8", errors="replace")
             diff = list(difflib.unified_diff(

@@ -49,15 +49,20 @@ function makeId() {
 async function callOllama(
   prompt: string,
   model: string,
-  system?: string
+  system?: string,
+  opts?: { workspaceFolder?: string; attachedFiles?: AttachedFile[]; enableTools?: boolean }
 ): Promise<string> {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), 185_000)
   try {
+    const body: any = { prompt, model, system }
+    if (opts?.workspaceFolder) body.workspace_folder = opts.workspaceFolder
+    if (opts?.attachedFiles) body.attached_files = opts.attachedFiles.map(f => f.name)
+    if (opts?.enableTools === false) body.no_tools = true
     const res = await fetch('/api/prompt', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, model, system }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     })
     clearTimeout(timeoutId)
@@ -216,8 +221,12 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
       // ── Phase 1: Agent-A reasons ──
       const systemA =
-        'You are an expert coding assistant. You have access to the attached files and workspace folder shown in the prompt. Read them carefully before answering. Only provide factual, accurate information. If unsure, say so.'
-      const responseA = await callOllama(fullPrompt, settings.agentAModel, systemA)
+        'You are an expert coding assistant. You have access to the attached files and workspace folder shown in the prompt, plus local file tools. Read files carefully before answering. Only provide factual, accurate information. If unsure, say so.'
+      const responseA = await callOllama(fullPrompt, settings.agentAModel, systemA, {
+        workspaceFolder: folder,
+        attachedFiles: files,
+        enableTools: true,
+      })
 
       const aDone: AgentState = {
         ...updatedA,
@@ -251,7 +260,9 @@ Your task: Review the response above. Identify any bugs, errors, hallucinations,
 
       const systemB =
         'You are a senior code reviewer. Be critical and thorough. Point out mistakes and provide corrected answers. Never repeat raw JSON dumps.'
-      const responseB = await callOllama(reviewPrompt, settings.agentBModel, systemB)
+      const responseB = await callOllama(reviewPrompt, settings.agentBModel, systemB, {
+        enableTools: false,
+      })
 
       const bDone: AgentState = {
         ...bReady,

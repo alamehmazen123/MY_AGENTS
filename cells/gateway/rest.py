@@ -23,6 +23,28 @@ REVIEW_SYSTEM_PROMPT = (
     "Be concise but thorough. Never repeat raw JSON or error dumps."
 )
 
+TOOL_INSTRUCTIONS = (
+    "You have access to local tools on this computer. To use a tool, output exactly one line in this format:\n"
+    "[[MCP:<tool_name>:<json_arguments>]]\n\n"
+    "Available tools:\n"
+    "- file_explorer: Browse/read/write/delete files and directories.\n"
+    "  Actions: read, list, stat, write, delete, mkdir, move.\n"
+    "  Args examples:\n"
+    '  {"action":"read","path":"C:\\\\Users\\\\Me\\\\file.txt"} -> returns file content\n'
+    '  {"action":"list","path":"C:\\\\Users\\\\Me\\\\Projects"} -> returns directory listing\n'
+    '  {"action":"write","path":"...","content":"..."} -> writes text to file\n'
+    '  {"action":"delete","path":"..."} -> deletes file or folder\n'
+    '  {"action":"mkdir","path":"..."} -> creates directory\n'
+    '  {"action":"move","path":"...","dest":"..."} -> moves/renames file\n'
+    "- search_ripgrep: Search text inside files.\n"
+    '  Args: {"query":"search text","path":"directory to search"}\n'
+    "- python_exec: Execute Python code safely.\n"
+    '  Args: {"code":"print(1+1)"}\n\n'
+    "After using a tool, you will receive its result and can continue. "
+    "Use tools whenever you need file information to answer accurately. "
+    "You may use up to 3 tools in sequence."
+)
+
 
 class RESTServer:
     """FastAPI REST server."""
@@ -63,6 +85,22 @@ class RESTServer:
         async def list_folder(req: Request):
             return await self._list_folder(req)
 
+        @self.app.post("/api/write-file")
+        async def write_file(req: Request):
+            return await self._write_file(req)
+
+        @self.app.post("/api/delete-file")
+        async def delete_file(req: Request):
+            return await self._delete_file(req)
+
+        @self.app.post("/api/create-folder")
+        async def create_folder(req: Request):
+            return await self._create_folder(req)
+
+        @self.app.post("/api/move-file")
+        async def move_file(req: Request):
+            return await self._move_file(req)
+
         @self.app.post("/prompt")
         async def prompt(req: Request):
             return await self._handle_prompt(req)
@@ -95,19 +133,10 @@ class RESTServer:
             return {"error": "no_path", "content": ""}
         try:
             p = Path(file_path).expanduser().resolve()
-            workspace = settings.workspace_root.expanduser().resolve()
-            # Security: allow reading within workspace or common user dirs
-            allowed = (
-                str(p).startswith(str(workspace))
-                or str(p).startswith(str(Path.home()))
-            )
-            if not allowed:
-                return {"error": "path_not_allowed", "content": ""}
             if not p.exists():
                 return {"error": "file_not_found", "content": ""}
             if p.is_dir():
                 return {"error": "is_directory", "content": ""}
-            # Limit file size to ~2MB to avoid context overflow
             MAX_SIZE = 2 * 1024 * 1024
             if p.stat().st_size > MAX_SIZE:
                 return {
@@ -126,13 +155,6 @@ class RESTServer:
             return {"error": "no_path", "items": []}
         try:
             p = Path(folder_path).expanduser().resolve()
-            workspace = settings.workspace_root.expanduser().resolve()
-            allowed = (
-                str(p).startswith(str(workspace))
-                or str(p).startswith(str(Path.home()))
-            )
-            if not allowed:
-                return {"error": "path_not_allowed", "items": []}
             if not p.exists() or not p.is_dir():
                 return {"error": "not_a_directory", "items": []}
             items = []
@@ -146,91 +168,193 @@ class RESTServer:
         except Exception as e:
             return {"error": str(e), "items": []}
 
+    async def _write_file(self, req: Request):
+        body = await req.json()
+        path = body.get("path", "")
+        content = body.get("content", "")
+        if not path:
+            return {"error": "no_path"}
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        try:
+            result = await mcp_cell.invoke("file_explorer", {"action": "write", "path": path, "content": content})
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _delete_file(self, req: Request):
+        body = await req.json()
+        path = body.get("path", "")
+        if not path:
+            return {"error": "no_path"}
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        try:
+            result = await mcp_cell.invoke("file_explorer", {"action": "delete", "path": path})
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _create_folder(self, req: Request):
+        body = await req.json()
+        path = body.get("path", "")
+        if not path:
+            return {"error": "no_path"}
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        try:
+            result = await mcp_cell.invoke("file_explorer", {"action": "mkdir", "path": path})
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _move_file(self, req: Request):
+        body = await req.json()
+        src = body.get("path", "")
+        dest = body.get("dest", "")
+        if not src or not dest:
+            return {"error": "missing_path_or_dest"}
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        try:
+            result = await mcp_cell.invoke("file_explorer", {"action": "move", "path": src, "dest": dest})
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
     async def _handle_prompt(self, req: Request):
         import httpx
         import re
+        import json
         body = await req.json()
         prompt_text = body.get("prompt", "")
         model = body.get("model", settings.ollama_default_model)
         system = body.get("system", DEFAULT_SYSTEM_PROMPT)
-        context_files = body.get("context_files", [])
+        workspace_folder = body.get("workspace_folder", "")
+        no_tools = body.get("no_tools", False)
 
         if not prompt_text:
             return {"error": "empty_prompt", "output": "[Error: empty prompt received]"}
 
-        # ── Auto-read referenced files via MCP ──
-        file_context = []
         mcp_cell = getattr(self._gateway, "_mcp", None)
+        full_system = system
+        if not no_tools and mcp_cell:
+            full_system = system + "\n\n" + TOOL_INSTRUCTIONS
 
-        # 1. Explicit context_files from frontend
-        for fpath in context_files:
-            if mcp_cell:
-                result = await mcp_cell.invoke("file_explorer", {"action": "read", "path": fpath})
-                if "content" in result:
-                    file_context.append(f"--- {result['name']} ---\n{result['content']}\n")
+        current_prompt = prompt_text
+        final_response = ""
 
-        # 2. Auto-detect file paths in prompt (e.g. src/main.py, config.json)
-        if mcp_cell:
-            detected_paths = re.findall(r'[\w\-./\\]+\.(py|js|ts|tsx|jsx|json|md|txt|yaml|yml|toml|html|css|java|go|rs|c|cpp|h|hpp)', prompt_text)
-            for dp in detected_paths:
-                # Avoid duplicates
-                if dp in context_files:
-                    continue
-                result = await mcp_cell.invoke("file_explorer", {"action": "read", "path": dp})
-                if "content" in result:
-                    file_context.append(f"--- {result['name']} ---\n{result['content']}\n")
+        MAX_TOOL_ITERATIONS = 3
 
-        if file_context:
-            prompt_text = "[Attached Files]\n" + "\n".join(file_context) + "\n[User Prompt]\n" + prompt_text
+        for iteration in range(MAX_TOOL_ITERATIONS + 1):
+            # Safety cap
+            MAX_PROMPT_LEN = 30000
+            if len(current_prompt) > MAX_PROMPT_LEN:
+                current_prompt = current_prompt[:MAX_PROMPT_LEN] + "\n\n[...truncated by backend]"
 
-        # Safety: cap prompt length to protect Ollama context window
-        MAX_PROMPT_LEN = 30000
-        if len(prompt_text) > MAX_PROMPT_LEN:
-            prompt_text = prompt_text[:MAX_PROMPT_LEN] + "\n\n[...truncated by backend]"
-
-        try:
-            async with httpx.AsyncClient(timeout=180) as client:
-                payload = {
-                    "model": model,
-                    "prompt": prompt_text,
-                    "stream": False,
-                }
-                if system:
-                    payload["system"] = system
-
-                res = await client.post(
-                    f"{settings.ollama_host}/api/generate",
-                    json=payload,
-                    timeout=180,
-                )
-                if res.status_code != 200:
-                    return {
-                        "error": f"ollama_http_{res.status_code}",
-                        "output": f"Ollama returned HTTP {res.status_code}: {res.text[:500]}",
+            try:
+                async with httpx.AsyncClient(timeout=180) as client:
+                    payload = {
                         "model": model,
+                        "prompt": current_prompt,
+                        "stream": False,
                     }
-                data = res.json()
-                response_text = data.get("response", "").strip()
-                if not response_text:
-                    return {
-                        "output": "[Model returned empty response — try again or check Ollama logs]",
-                        "model": model,
-                        "done": data.get("done", False),
-                    }
+                    if full_system:
+                        payload["system"] = full_system
+
+                    res = await client.post(
+                        f"{settings.ollama_host}/api/generate",
+                        json=payload,
+                        timeout=180,
+                    )
+                    if res.status_code != 200:
+                        return {
+                            "error": f"ollama_http_{res.status_code}",
+                            "output": f"Ollama returned HTTP {res.status_code}: {res.text[:500]}",
+                            "model": model,
+                        }
+                    data = res.json()
+                    response_text = data.get("response", "").strip()
+                    if not response_text:
+                        return {
+                            "output": "[Model returned empty response — try again or check Ollama logs]",
+                            "model": model,
+                            "done": data.get("done", False),
+                        }
+
+                    final_response = response_text
+
+                    if no_tools or not mcp_cell or iteration >= MAX_TOOL_ITERATIONS:
+                        break
+
+                    tool_calls = self._extract_tool_calls(response_text)
+                    if not tool_calls:
+                        break
+
+                    tool_results = []
+                    for tc in tool_calls:
+                        args = tc["args"]
+                        # Resolve relative paths against workspace folder
+                        if workspace_folder:
+                            wf = Path(workspace_folder)
+                            for key in ("path", "dest"):
+                                if key in args:
+                                    val = args[key]
+                                    if isinstance(val, str):
+                                        if not Path(val).is_absolute():
+                                            args[key] = str(wf / val)
+
+                        result = await mcp_cell.invoke(tc["preset"], args)
+                        tool_results.append({"call": tc, "result": result})
+
+                    current_prompt = self._build_continuation_prompt(prompt_text, response_text, tool_results)
+                    # After first turn, simplify system prompt
+                    full_system = system + "\nContinue based on the tool results. Do not use more tools unless necessary."
+
+            except httpx.ConnectError as e:
                 return {
-                    "output": response_text,
+                    "error": "ollama_not_reachable",
+                    "output": f"Cannot connect to Ollama at {settings.ollama_host}. Make sure 'ollama serve' is running.",
                     "model": model,
-                    "done": data.get("done", False),
-                    "eval_count": data.get("eval_count", 0),
                 }
-        except httpx.ConnectError as e:
-            return {
-                "error": "ollama_not_reachable",
-                "output": f"Cannot connect to Ollama at {settings.ollama_host}. Make sure 'ollama serve' is running.",
-                "model": model,
-            }
-        except Exception as e:
-            return {"error": str(e), "output": f"[Error: {str(e)}]", "model": model}
+            except Exception as e:
+                return {"error": str(e), "output": f"[Error: {str(e)}]", "model": model}
+
+        return {
+            "output": final_response,
+            "model": model,
+            "done": True,
+        }
+
+    def _extract_tool_calls(self, text: str):
+        import re
+        import json
+        pattern = re.compile(r'\[\[MCP:(\w+):({.*?})\]\]')
+        calls = []
+        for match in pattern.finditer(text):
+            preset = match.group(1)
+            try:
+                args = json.loads(match.group(2))
+                calls.append({"preset": preset, "args": args, "raw": match.group(0)})
+            except json.JSONDecodeError:
+                continue
+        return calls
+
+    def _build_continuation_prompt(self, original_prompt: str, last_response: str, tool_results: list):
+        import json
+        parts = [original_prompt]
+        parts.append("\n\n[Your previous response]\n" + last_response)
+        parts.append("\n\n[Tool Results]\n")
+        for tr in tool_results:
+            parts.append(f"Tool: {tr['call']['preset']}")
+            parts.append(f"Args: {json.dumps(tr['call']['args'])}")
+            parts.append(f"Result: {json.dumps(tr['result'])}\n")
+        parts.append("Based on the tool results above, provide your final answer. Do not use more tools unless necessary.")
+        return "\n".join(parts)
 
     async def _mcp_invoke(self, req: Request):
         body = await req.json()

@@ -3,7 +3,6 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from kernel.config import settings
 
 
 def handle(args: dict) -> dict:
@@ -13,9 +12,6 @@ def handle(args: dict) -> dict:
         return {"error": "missing_query"}
     try:
         p = Path(path_str).expanduser().resolve()
-        workspace = settings.workspace_root.expanduser().resolve()
-        if not (str(p).startswith(str(workspace)) or str(p).startswith(str(Path.home()))):
-            return {"error": "path_not_allowed"}
         if not p.exists() or not p.is_dir():
             return {"error": "not_a_directory"}
 

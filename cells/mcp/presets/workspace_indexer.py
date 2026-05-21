@@ -7,9 +7,6 @@ def handle(args: dict) -> dict:
     path_str = args.get("path", str(settings.workspace_root))
     try:
         p = Path(path_str).expanduser().resolve()
-        workspace = settings.workspace_root.expanduser().resolve()
-        if not (str(p).startswith(str(workspace)) or str(p).startswith(str(Path.home()))):
-            return {"error": "path_not_allowed"}
         if not p.exists() or not p.is_dir():
             return {"error": "not_a_directory"}
 

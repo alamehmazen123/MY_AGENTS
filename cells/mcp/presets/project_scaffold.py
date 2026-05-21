@@ -26,9 +26,6 @@ def handle(args: dict) -> dict:
     template = args.get("template", "python")
     name = args.get("name", "new_project")
     base = Path(args.get("path", str(settings.workspace_root))).expanduser().resolve()
-    workspace = settings.workspace_root.expanduser().resolve()
-    if not (str(base).startswith(str(workspace)) or str(base).startswith(str(Path.home()))):
-        return {"error": "path_not_allowed"}
 
     target = base / name
     try:
