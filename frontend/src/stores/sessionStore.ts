@@ -28,14 +28,19 @@ export interface Session {
   agentB: AgentState
   attachedFiles: AttachedFile[]
   workspaceFolder: string
+  winner: 'A' | 'B' | null
+  executionResult: string | null
 }
 
 export interface SessionState {
   sessions: Session[]
   activeSessionId: string
   isGenerating: boolean
+  unloadStatus: string
   sendPrompt: (text: string, opts?: { files?: AttachedFile[]; folder?: string }) => void
   abortGeneration: () => void
+  selectWinner: (agent: 'A' | 'B') => void
+  executeWinner: () => Promise<void>
   createSession: () => void
   switchSession: (id: string) => void
   deleteSession: (id: string) => void
@@ -110,6 +115,20 @@ async function callOllama(
   }
 }
 
+async function verifyZeroModels(): Promise<{ ok: boolean; status: string }> {
+  try {
+    const res = await fetch('/api/ollama-ps', { method: 'GET' })
+    if (!res.ok) return { ok: false, status: 'check_failed' }
+    const data = await res.json()
+    if (data.zero_loaded) {
+      return { ok: true, status: '✅ Zero models loaded' }
+    }
+    return { ok: false, status: `⚠️ ${data.models.length} model(s) still loaded: ${data.models.join(', ')}` }
+  } catch {
+    return { ok: false, status: '⚠️ Could not verify unload' }
+  }
+}
+
 function truncate(str: string, maxLen: number): string {
   if (str.length <= maxLen) return str
   return str.slice(0, maxLen) + '\n\n[...truncated]'
@@ -159,6 +178,8 @@ function makeSession(id: string, name: string): Session {
     },
     attachedFiles: [],
     workspaceFolder: '',
+    winner: null,
+    executionResult: null,
   }
 }
 
@@ -168,6 +189,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
     sessions: [initial],
     activeSessionId: initial.id,
     isGenerating: false,
+    unloadStatus: '',
 
     createSession: () => {
       const id = `sess-${Date.now()}`
@@ -209,6 +231,61 @@ export const useSessionStore = create<SessionState>((set, get) => {
             : sess
         ),
       }))
+    },
+
+    selectWinner: (agent: 'A' | 'B') => {
+      set((s) => ({
+        sessions: s.sessions.map((sess) =>
+          sess.id === s.activeSessionId ? { ...sess, winner: agent, executionResult: null } : sess
+        ),
+      }))
+    },
+
+    executeWinner: async () => {
+      const state = get()
+      const session = state.sessions.find((s) => s.id === state.activeSessionId)
+      if (!session || !session.winner) return
+
+      const winnerAgent = session.winner === 'A' ? session.agentA : session.agentB
+      const winnerMsg = winnerAgent.messages
+        .filter((m) => m.role === 'agent')
+        .pop()
+
+      if (!winnerMsg) return
+
+      set({ isGenerating: true, unloadStatus: 'Executing winner plan...' })
+
+      try {
+        const res = await fetch('/api/execute-plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            plan: winnerMsg.text,
+            workspace_folder: session.workspaceFolder,
+          }),
+        })
+        const data = await res.json()
+        const resultText = data.status === 'executed'
+          ? `✅ Executed ${data.results?.length || 0} tool(s)\n` + data.results.map((r: any) => `${r.tool}: ${JSON.stringify(r.result).slice(0, 200)}`).join('\n')
+          : `⚠️ ${data.status}\n${data.plan || data.error || ''}`
+
+        set((s) => ({
+          isGenerating: false,
+          unloadStatus: '',
+          sessions: s.sessions.map((sess) =>
+            sess.id === s.activeSessionId
+              ? {
+                  ...sess,
+                  executionResult: resultText,
+                  agentA: { ...sess.agentA, status: 'online' },
+                  agentB: { ...sess.agentB, status: sess.agentB.status === 'working' ? 'waiting' : sess.agentB.status },
+                }
+              : sess
+          ),
+        }))
+      } catch (e: any) {
+        set({ isGenerating: false, unloadStatus: `[Error: ${e.message}]` })
+      }
     },
 
     abortGeneration: () => {
@@ -258,7 +335,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
       const abortCtrl = new AbortController()
       currentAbortController = abortCtrl
-      set({ isGenerating: true })
+      set({ isGenerating: true, unloadStatus: '' })
 
       const updatedA: AgentState = {
         ...session.agentA,
@@ -274,7 +351,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
       set((s) => ({
         sessions: s.sessions.map((sess) =>
           sess.id === s.activeSessionId
-            ? { ...sess, agentA: updatedA, agentB: updatedB, attachedFiles: files, workspaceFolder: folder }
+            ? { ...sess, agentA: updatedA, agentB: updatedB, attachedFiles: files, workspaceFolder: folder, winner: null, executionResult: null }
             : sess
         ),
       }))
@@ -332,6 +409,10 @@ export const useSessionStore = create<SessionState>((set, get) => {
           ],
           status: 'online',
         }
+
+        // Verify Agent-A unloaded
+        const verifyA = await verifyZeroModels()
+        set({ unloadStatus: `Agent-A done → ${verifyA.status}` })
 
         if (!isBEnabled) {
           set((s) => ({
@@ -409,6 +490,11 @@ Your task: Review the response above. Identify any bugs, errors, hallucinations,
           ],
           status: 'online',
         }
+
+        // Verify Agent-B unloaded
+        const verifyB = await verifyZeroModels()
+        set({ unloadStatus: `Agent-B done → ${verifyB.status}` })
+
         set((s) => ({
           sessions: s.sessions.map((sess) =>
             sess.id === s.activeSessionId ? { ...sess, agentB: bDone } : sess

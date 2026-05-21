@@ -109,6 +109,18 @@ class RESTServer:
         async def api_prompt(req: Request):
             return await self._handle_prompt(req)
 
+        @self.app.get("/api/ollama-ps")
+        async def ollama_ps():
+            return await self._ollama_ps()
+
+        @self.app.post("/api/unload-model")
+        async def unload_model(req: Request):
+            return await self._unload_model(req)
+
+        @self.app.post("/api/execute-plan")
+        async def execute_plan(req: Request):
+            return await self._execute_plan(req)
+
         @self.app.get("/api/presets")
         async def get_presets():
             return {
@@ -342,6 +354,9 @@ class RESTServer:
                     if options:
                         payload["options"] = options
 
+                    # Force unload after generation to guarantee zero models between agents
+                    payload["keep_alive"] = 0
+
                     res = await client.post(
                         f"{settings.ollama_host}/api/generate",
                         json=payload,
@@ -486,6 +501,60 @@ class RESTServer:
         if not mcp_cell:
             return {"error": "mcp_not_available"}
         return {"status": "reload_not_required", "message": "Presets are loaded at startup."}
+
+    async def _ollama_ps(self):
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.get(f"{settings.ollama_host}/api/ps")
+                if res.status_code == 200:
+                    data = res.json()
+                    models = [m.get("name", m.get("model", "")) for m in data.get("models", [])]
+                    return {"models": models, "zero_loaded": len(models) == 0}
+                return {"models": [], "zero_loaded": True, "error": f"HTTP {res.status_code}"}
+        except Exception as e:
+            return {"models": [], "zero_loaded": True, "error": str(e)}
+
+    async def _unload_model(self, req: Request):
+        body = await req.json()
+        model = body.get("model", "")
+        if not model:
+            return {"error": "missing_model"}
+        runtime = getattr(self._gateway, "_runtime", None)
+        if not runtime:
+            return {"error": "runtime_not_available"}
+        try:
+            ok = await runtime._model_manager.unload(model)
+            verify = await runtime._model_manager.verify_zero_loaded()
+            return {"unloaded": ok, "verification": verify}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _execute_plan(self, req: Request):
+        import json
+        body = await req.json()
+        plan_text = body.get("plan", "")
+        workspace_folder = body.get("workspace_folder", "")
+        if not plan_text:
+            return {"error": "empty_plan"}
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        tool_calls = self._extract_tool_calls(plan_text)
+        if not tool_calls:
+            return {"status": "no_tools_found", "plan": plan_text[:500]}
+        results = []
+        for tc in tool_calls:
+            args = tc["args"]
+            if workspace_folder:
+                wf = Path(workspace_folder)
+                for key in ("path", "dest"):
+                    if key in args and isinstance(args[key], str):
+                        if not Path(args[key]).is_absolute():
+                            args[key] = str(wf / args[key])
+            result = await mcp_cell.invoke(tc["preset"], args)
+            results.append({"tool": tc["preset"], "args": tc["args"], "result": result})
+        return {"status": "executed", "results": results}
 
     def _setup_static(self):
         dist_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
