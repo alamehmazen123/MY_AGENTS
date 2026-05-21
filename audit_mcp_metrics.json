@@ -1,0 +1,32 @@
+{
+  "file_explorer": {
+    "runs": 100,
+    "passes": 100,
+    "fails": 0,
+    "total_time_sec": 46.88,
+    "avg_latency_ms": 468.82,
+    "min_latency_ms": 433.77,
+    "max_latency_ms": 555.5,
+    "errors": []
+  },
+  "workspace_indexer": {
+    "runs": 100,
+    "passes": 100,
+    "fails": 0,
+    "total_time_sec": 172.28,
+    "avg_latency_ms": 1722.77,
+    "min_latency_ms": 1617.27,
+    "max_latency_ms": 2129.73,
+    "errors": []
+  },
+  "search_ripgrep": {
+    "runs": 100,
+    "passes": 100,
+    "fails": 0,
+    "total_time_sec": 449.27,
+    "avg_latency_ms": 4492.7,
+    "min_latency_ms": 4363.87,
+    "max_latency_ms": 5751.04,
+    "errors": []
+  }
+}

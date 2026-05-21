@@ -1,0 +1,10 @@
+{
+  "cycles": 50,
+  "passes": 50,
+  "fails": 0,
+  "total_time_sec": 178.85,
+  "avg_latency_ms": 3577.04,
+  "min_latency_ms": 3504.94,
+  "max_latency_ms": 3704.04,
+  "errors": []
+}
