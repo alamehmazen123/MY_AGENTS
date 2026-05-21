@@ -2,6 +2,13 @@
 import os
 import time
 
+SCHEMA = {
+    "name": "health_monitor",
+    "description": "Monitor system CPU, memory, and disk usage.",
+    "parameters": {},
+    "required": [],
+}
+
 
 def handle(args: dict) -> dict:
     try:
@@ -13,18 +20,9 @@ def handle(args: dict) -> dict:
         try:
             import psutil
             mem = psutil.virtual_memory()
-            result["memory"] = {
-                "total": mem.total,
-                "available": mem.available,
-                "percent": mem.percent,
-            }
+            result["memory"] = {"total": mem.total, "available": mem.available, "percent": mem.percent}
             disk = psutil.disk_usage(".")
-            result["disk"] = {
-                "total": disk.total,
-                "used": disk.used,
-                "free": disk.free,
-                "percent": disk.percent,
-            }
+            result["disk"] = {"total": disk.total, "used": disk.used, "free": disk.free, "percent": disk.percent}
         except ImportError:
             result["psutil"] = "not_installed"
         return result

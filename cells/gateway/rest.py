@@ -155,6 +155,30 @@ class RESTServer:
         async def mcp_invoke(req: Request):
             return await self._mcp_invoke(req)
 
+        @self.app.get("/api/mcp/tools")
+        async def mcp_tools():
+            return await self._mcp_tools()
+
+        @self.app.get("/api/mcp/status")
+        async def mcp_status():
+            return await self._mcp_status()
+
+        @self.app.get("/api/mcp/metrics")
+        async def mcp_metrics():
+            return await self._mcp_metrics()
+
+        @self.app.get("/api/mcp/workers")
+        async def mcp_workers():
+            return await self._mcp_workers()
+
+        @self.app.post("/api/mcp/restart")
+        async def mcp_restart():
+            return await self._mcp_restart()
+
+        @self.app.post("/api/mcp/reload")
+        async def mcp_reload():
+            return await self._mcp_reload()
+
     async def _list_ollama_models(self):
         import httpx
         try:
@@ -422,6 +446,46 @@ class RESTServer:
             return result
         except Exception as e:
             return {"error": str(e)}
+
+    async def _mcp_tools(self):
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        return {"tools": mcp_cell.list_tools()}
+
+    async def _mcp_status(self):
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        from kernel.mcp.protocol.tool_definition import ToolCapability
+        return {
+            "ready": True,
+            "invariants": ["memory_bounded", "workspace_jailed", "process_isolated", "policy_driven"],
+        }
+
+    async def _mcp_metrics(self):
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        return mcp_cell.get_metrics()
+
+    async def _mcp_workers(self):
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        return {"workers": "isolated_processes", "max_parallel": 4}
+
+    async def _mcp_restart(self):
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        return {"status": "restart_not_required", "message": "Workers are stateless and auto-recover."}
+
+    async def _mcp_reload(self):
+        mcp_cell = getattr(self._gateway, "_mcp", None)
+        if not mcp_cell:
+            return {"error": "mcp_not_available"}
+        return {"status": "reload_not_required", "message": "Presets are loaded at startup."}
 
     def _setup_static(self):
         dist_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"

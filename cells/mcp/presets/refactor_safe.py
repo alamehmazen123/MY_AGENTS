@@ -1,6 +1,20 @@
-"""cells/mcp/presets/refactor_safe.py — Safe code refactoring."""
+"""cells/mcp/presets/refactor_safe.py — Safe code refactoring (workspace-jailed)."""
 import re
 from pathlib import Path
+from kernel.security.workspace_guard import WorkspaceGuard, WorkspaceViolation
+from kernel.config import settings
+
+_guard = WorkspaceGuard(settings.workspace_root)
+
+SCHEMA = {
+    "name": "refactor_safe",
+    "description": "Safe code refactoring like symbol renaming inside the workspace.",
+    "parameters": {
+        "action": {"type": "string", "enum": ["rename_symbol"]},
+        "path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"},
+    },
+    "required": ["action", "path"],
+}
 
 
 def handle(args: dict) -> dict:
@@ -9,11 +23,10 @@ def handle(args: dict) -> dict:
     if not path_str:
         return {"error": "missing_path"}
     try:
-        p = Path(path_str).expanduser().resolve()
+        p = _guard.validate(path_str)
         if not p.exists() or not p.is_file():
             return {"error": "file_not_found"}
         content = p.read_text(encoding="utf-8", errors="replace")
-
         if action == "rename_symbol":
             old = args.get("old", "")
             new = args.get("new", "")
@@ -24,7 +37,8 @@ def handle(args: dict) -> dict:
             p.write_text(new_content, encoding="utf-8")
             count = len(re.findall(pattern, content))
             return {"path": str(p), "replacements": count, "old": old, "new": new}
-        else:
-            return {"error": "unknown_action"}
+        return {"error": "unknown_action"}
+    except WorkspaceViolation as e:
+        return {"error": "workspace_violation", "message": str(e)}
     except Exception as e:
         return {"error": str(e)}

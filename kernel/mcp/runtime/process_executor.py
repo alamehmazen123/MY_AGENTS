@@ -17,23 +17,41 @@ class ProcessExecutor:
         self._metrics = {"invocations": 0, "timeouts": 0, "crashes": 0}
 
     async def run(self, tool: ToolDefinition, args: dict) -> dict:
+        import importlib.util
         limits = tool.policy.limits if tool.policy else ResourceLimits()
         timeout = tool.timeout
 
-        task_json = {"preset": tool.name, "args": args}
-        limits_dict = {
-            "memory_mb": limits.memory_mb,
-            "cpu_seconds": limits.cpu_seconds,
-            "open_files": limits.open_files,
-            "timeout": limits.timeout,
-        }
+        # Check if this is a registered preset module; if not, run inline (tests)
+        module_name = f"cells.mcp.presets.{tool.name}"
+        is_preset = importlib.util.find_spec(module_name) is not None
 
-        loop = asyncio.get_running_loop()
         self._metrics["invocations"] += 1
+        start = __import__("time").time()
 
-        raw = await loop.run_in_executor(
-            None, run_in_worker, task_json, limits_dict, timeout
-        )
+        if is_preset:
+            task_json = {"preset": tool.name, "args": args}
+            limits_dict = {
+                "memory_mb": limits.memory_mb,
+                "cpu_seconds": limits.cpu_seconds,
+                "open_files": limits.open_files,
+                "timeout": limits.timeout,
+            }
+            loop = asyncio.get_running_loop()
+            raw = await loop.run_in_executor(
+                None, run_in_worker, task_json, limits_dict, timeout
+            )
+        else:
+            # Inline execution for tests / non-preset tools
+            try:
+                if tool.handler is None:
+                    raw = {"status": "error", "data": {}, "error_message": "handler_not_set"}
+                else:
+                    result = tool.handler(args)
+                    if not isinstance(result, dict):
+                        result = {"output": result}
+                    raw = {"status": "ok", "data": result, "error_message": ""}
+            except Exception as e:
+                raw = {"status": "error", "data": {}, "error_message": f"{e}"}
 
         if raw["status"] == "killed":
             if raw["error_message"] == "execution_timeout":

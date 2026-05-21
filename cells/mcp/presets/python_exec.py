@@ -1,7 +1,14 @@
-"""cells/mcp/presets/python_exec.py — Safe Python code execution."""
+"""cells/mcp/presets/python_exec.py — Sandboxed Python execution in isolated worker."""
 import io
 import traceback
 from contextlib import redirect_stdout, redirect_stderr
+
+SCHEMA = {
+    "name": "python_exec",
+    "description": "Execute Python code safely with restricted builtins.",
+    "parameters": {"code": {"type": "string"}},
+    "required": ["code"],
+}
 
 
 def handle(args: dict) -> dict:
@@ -28,9 +35,6 @@ def handle(args: dict) -> dict:
         stderr_buffer = io.StringIO()
         with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
             exec(code, safe_globals, {})
-        return {
-            "stdout": stdout_buffer.getvalue(),
-            "stderr": stderr_buffer.getvalue(),
-        }
+        return {"stdout": stdout_buffer.getvalue(), "stderr": stderr_buffer.getvalue()}
     except Exception:
         return {"error": traceback.format_exc()}

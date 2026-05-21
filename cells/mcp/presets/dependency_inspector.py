@@ -1,14 +1,23 @@
-"""cells/mcp/presets/dependency_inspector.py — Parse dependency manifests."""
+"""cells/mcp/presets/dependency_inspector.py — Parse dependency manifests (workspace-jailed)."""
 import json
 from pathlib import Path
+from kernel.security.workspace_guard import WorkspaceGuard, WorkspaceViolation
 from kernel.config import settings
+
+_guard = WorkspaceGuard(settings.workspace_root)
+
+SCHEMA = {
+    "name": "dependency_inspector",
+    "description": "Parse requirements.txt, package.json, and pyproject.toml.",
+    "parameters": {"path": {"type": "string"}},
+    "required": [],
+}
 
 
 def handle(args: dict) -> dict:
     path_str = args.get("path", str(settings.workspace_root))
     try:
-        p = Path(path_str).expanduser().resolve()
-
+        p = _guard.validate(path_str)
         deps = {}
         req = p / "requirements.txt"
         if req.exists():
@@ -34,5 +43,7 @@ def handle(args: dict) -> dict:
             except Exception:
                 pass
         return {"path": str(p), "dependencies": deps}
+    except WorkspaceViolation as e:
+        return {"error": "workspace_violation", "message": str(e)}
     except Exception as e:
         return {"error": str(e)}
