@@ -24,7 +24,20 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
         ? 'bg-yellow-500'
         : status === 'online'
           ? 'bg-green-500'
-          : 'bg-gray-400'
+          : status === 'disabled'
+            ? 'bg-gray-600'
+            : 'bg-gray-400'
+
+  const statusLabel =
+    status === 'online'
+      ? 'Online'
+      : status === 'waiting'
+        ? 'Waiting'
+        : status === 'working'
+          ? 'Working'
+          : status === 'disabled'
+            ? 'Disabled'
+            : status
 
   return (
     <div className={`flex-1 flex flex-col rounded-lg border border-gray-200 overflow-hidden ${bgColor} ${textColor}`}>
@@ -36,15 +49,19 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
         <div className="text-right text-xs space-y-0.5">
           <div className="flex items-center gap-1 justify-end">
             <span className={`w-2 h-2 rounded-full ${statusColor} ${statusDot}`} />
-            {status === 'online' ? 'Online' : status === 'waiting' ? 'Waiting' : status === 'working' ? 'Working' : status}
+            {statusLabel}
           </div>
-          <div className="opacity-75">{model}</div>
+          <div className="opacity-75">{model || '—'}</div>
         </div>
       </div>
       <div className="flex-1 overflow-auto p-3 space-y-2">
         {messages.length === 0 && (
           <div className="text-center text-sm opacity-50 mt-8">
-            {agent === 'A' ? 'Waiting for input...' : 'Waiting for Agent-A...'}
+            {status === 'disabled'
+              ? 'Disabled in current preset'
+              : agent === 'A'
+                ? 'Waiting for input...'
+                : 'Waiting for Agent-A...'}
           </div>
         )}
         {messages.map((msg) => (

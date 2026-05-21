@@ -109,6 +109,48 @@ class RESTServer:
         async def api_prompt(req: Request):
             return await self._handle_prompt(req)
 
+        @self.app.get("/api/presets")
+        async def get_presets():
+            return {
+                "presets": {
+                    "CHAT": {
+                        "name": "CHAT",
+                        "description": "General conversation, no code execution. ~2.5 GB RAM, 10-18 tok/s.",
+                        "agent_a": {"name": "qwen3:4b", "context_length": 4096, "temperature": 0.7},
+                        "agent_b": None,
+                        "mcp_tools_enabled": False,
+                    },
+                    "REVIEWING": {
+                        "name": "REVIEWING",
+                        "description": "Fast response + deep quality review. ~6.0 GB RAM.",
+                        "agent_a": {"name": "qwen3:1.7b", "context_length": 4096, "temperature": 0.7},
+                        "agent_b": {"name": "qwen3:8b", "context_length": 4096, "temperature": 0.3},
+                        "mcp_tools_enabled": False,
+                    },
+                    "CODING": {
+                        "name": "CODING",
+                        "description": "Fast code generation + quality review. ~5.5 GB RAM.",
+                        "agent_a": {"name": "deepseek-coder:1.3b", "context_length": 8192, "temperature": 0.2},
+                        "agent_b": {"name": "qwen2.5-coder:7b", "context_length": 8192, "temperature": 0.3},
+                        "mcp_tools_enabled": True,
+                    },
+                    "SUPER_CODING": {
+                        "name": "SUPER_CODING",
+                        "description": "Quality generation + ultimate review. ~5.7 GB RAM.",
+                        "agent_a": {"name": "qwen2.5-coder:3b", "context_length": 8192, "temperature": 0.2},
+                        "agent_b": {"name": "deepseek-coder:6.7b", "context_length": 8192, "temperature": 0.3},
+                        "mcp_tools_enabled": True,
+                    },
+                    "EXECUTION": {
+                        "name": "EXECUTION",
+                        "description": "Automated code execution and verification. ~3.3 GB RAM.",
+                        "agent_a": {"name": "deepseek-coder:1.3b", "context_length": 16384, "temperature": 0.1},
+                        "agent_b": {"name": "qwen3:4b", "context_length": 16384, "temperature": 0.2},
+                        "mcp_tools_enabled": True,
+                    },
+                }
+            }
+
         @self.app.post("/api/mcp/invoke")
         async def mcp_invoke(req: Request):
             return await self._mcp_invoke(req)
@@ -236,6 +278,8 @@ class RESTServer:
         system = body.get("system", DEFAULT_SYSTEM_PROMPT)
         workspace_folder = body.get("workspace_folder", "")
         no_tools = body.get("no_tools", False)
+        temperature = body.get("temperature")
+        context_length = body.get("context_length")
 
         if not prompt_text:
             return {"error": "empty_prompt", "output": "[Error: empty prompt received]"}
@@ -265,6 +309,14 @@ class RESTServer:
                     }
                     if full_system:
                         payload["system"] = full_system
+
+                    options = {}
+                    if temperature is not None:
+                        options["temperature"] = temperature
+                    if context_length:
+                        options["num_ctx"] = context_length
+                    if options:
+                        payload["options"] = options
 
                     res = await client.post(
                         f"{settings.ollama_host}/api/generate",

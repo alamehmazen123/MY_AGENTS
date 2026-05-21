@@ -4,7 +4,6 @@ import type { AttachedFile } from '../../stores/sessionStore'
 
 function readFileContent(file: File): Promise<string> {
   return new Promise((resolve) => {
-    // Skip binary-looking files
     const binaryExts = ['.xlsx', '.xls', '.pdf', '.zip', '.tar', '.gz', '.rar', '.7z', '.exe', '.dll', '.so', '.dylib', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.mp3', '.mp4', '.avi', '.mov', '.wasm']
     const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
     if (binaryExts.includes(ext)) {
@@ -26,13 +25,18 @@ export function PromptBar() {
   const [folderPath, setFolderPath] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sendPrompt = useSessionStore((s) => s.sendPrompt)
+  const abortGeneration = useSessionStore((s) => s.abortGeneration)
+  const isGenerating = useSessionStore((s) => s.isGenerating)
 
   const handleSend = () => {
     if (!text.trim() && attachedFiles.length === 0) return
     sendPrompt(text, { files: attachedFiles, folder: workspaceFolder })
     setText('')
     setAttachedFiles([])
-    // Keep workspace folder across prompts (like Claude Code)
+  }
+
+  const handleStop = () => {
+    abortGeneration()
   }
 
   const handleFiles = async (files: FileList | null) => {
@@ -100,7 +104,7 @@ export function PromptBar() {
             value={folderPath}
             onChange={(e) => setFolderPath(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') applyFolder() }}
-            placeholder="C:\\Users\\... or /home/..."
+            placeholder="C:\Users\... or /home/..."
             className="flex-1 bg-gray-900 rounded px-3 py-1.5 text-xs text-gray-100 border border-gray-700 focus:border-blue-500 focus:outline-none"
             autoFocus
           />
@@ -152,18 +156,23 @@ export function PromptBar() {
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
-              handleSend()
+              if (!isGenerating) handleSend()
             }
           }}
-          placeholder="Type your prompt..."
+          placeholder={isGenerating ? 'Generating...' : 'Type your prompt...'}
         />
         <button
           type="button"
-          onClick={handleSend}
-          disabled={!text.trim() && attachedFiles.length === 0}
-          className="px-5 bg-blue-600 rounded-lg text-sm hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 font-medium transition-colors"
+          onClick={isGenerating ? handleStop : handleSend}
+          disabled={!isGenerating && !text.trim() && attachedFiles.length === 0}
+          className={`px-5 rounded-lg text-sm font-medium transition-colors ${
+            isGenerating
+              ? 'bg-red-600 hover:bg-red-500 text-white'
+              : 'bg-blue-600 hover:bg-blue-500 text-white disabled:bg-gray-700 disabled:text-gray-500'
+          }`}
+          title={isGenerating ? 'Stop generation' : 'Send prompt'}
         >
-          →
+          {isGenerating ? '⏹' : '→'}
         </button>
       </div>
     </div>

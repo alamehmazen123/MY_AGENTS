@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useSessionStore } from '../../stores/sessionStore'
-import { useSettingsStore } from '../../stores/settingsStore'
+import { useSettingsStore, PRESETS, HIGH_RISK_MODELS } from '../../stores/settingsStore'
+import type { PresetName } from '../../stores/settingsStore'
 
 const MCP_PRESETS = [
   { id: 'file_explorer', name: 'File Explorer', desc: 'Browse workspace files' },
@@ -19,6 +20,8 @@ const MCP_PRESETS = [
   { id: 'rollback_manager', name: 'Rollback Manager', desc: 'Undo changes safely' },
 ]
 
+const PRESET_NAMES: PresetName[] = ['CHAT', 'REVIEWING', 'CODING', 'SUPER_CODING', 'EXECUTION', 'CUSTOM']
+
 export function Sidebar() {
   const sessions = useSessionStore((s) => s.sessions)
   const activeId = useSessionStore((s) => s.activeSessionId)
@@ -28,11 +31,13 @@ export function Sidebar() {
   const updateSessionModels = useSessionStore((s) => s.updateSessionModels)
 
   const theme = useSettingsStore((s) => s.theme)
+  const preset = useSettingsStore((s) => s.preset)
   const agentAModel = useSettingsStore((s) => s.agentAModel)
   const agentBModel = useSettingsStore((s) => s.agentBModel)
   const availableModels = useSettingsStore((s) => s.availableModels)
   const mcpEnabled = useSettingsStore((s) => s.mcpEnabled)
   const setTheme = useSettingsStore((s) => s.setTheme)
+  const setPreset = useSettingsStore((s) => s.setPreset)
   const setAgentAModel = useSettingsStore((s) => s.setAgentAModel)
   const setAgentBModel = useSettingsStore((s) => s.setAgentBModel)
   const setMcpEnabled = useSettingsStore((s) => s.setMcpEnabled)
@@ -65,11 +70,18 @@ export function Sidebar() {
     setTheme(t)
   }
 
+  const handlePresetChange = (p: PresetName) => {
+    setPreset(p)
+    updateSessionModels()
+  }
+
   const handleRefresh = async () => {
     setRefreshing(true)
     await fetchModels()
     setTimeout(() => setRefreshing(false), 600)
   }
+
+  const currentPresetInfo = PRESETS[preset]
 
   return (
     <aside className="w-64 bg-[#202123] border-r border-gray-800 flex flex-col">
@@ -213,6 +225,34 @@ export function Sidebar() {
         {/* ── SETTINGS TAB ── */}
         {activeTab === 'settings' && (
           <div className="space-y-4 p-2">
+            {/* Preset */}
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Preset Mode</label>
+              <select
+                value={preset}
+                onChange={(e) => handlePresetChange(e.target.value as PresetName)}
+                className="w-full bg-gray-800 text-gray-100 text-sm rounded border border-gray-700 px-2 py-1.5 focus:border-blue-500 focus:outline-none"
+              >
+                {PRESET_NAMES.map((p) => (
+                  <option key={p} value={p}>
+                    {p === 'SUPER_CODING' ? 'SUPER-CODING' : p}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[10px] text-gray-500 mt-1 leading-tight">
+                {currentPresetInfo.description}
+              </p>
+              {preset !== 'CUSTOM' && (
+                <div className="mt-1 text-[10px] text-gray-600">
+                  A: {currentPresetInfo.agentA.name} (temp {currentPresetInfo.agentA.temperature})<br />
+                  B: {currentPresetInfo.agentB?.name || 'DISABLED'}
+                  {currentPresetInfo.mcpToolsEnabled && (
+                    <span className="text-green-600 ml-1">• MCP ON</span>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Agent-A Model */}
             <div>
               <label className="text-xs text-gray-400 block mb-1">Agent-A Model (Reasoner)</label>
@@ -225,6 +265,9 @@ export function Sidebar() {
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
+              {HIGH_RISK_MODELS.includes(agentAModel) && (
+                <span className="text-[10px] text-red-400 mt-0.5 block font-medium">⚠️ HIGH RISK — slow on CPU</span>
+              )}
             </div>
 
             {/* Agent-B Model */}
@@ -235,10 +278,14 @@ export function Sidebar() {
                 onChange={(e) => handleModelBChange(e.target.value)}
                 className="w-full bg-gray-800 text-gray-100 text-sm rounded border border-gray-700 px-2 py-1.5 focus:border-blue-500 focus:outline-none"
               >
+                <option value="">DISABLED</option>
                 {availableModels.map((m) => (
                   <option key={m} value={m}>{m}</option>
                 ))}
               </select>
+              {agentBModel && HIGH_RISK_MODELS.includes(agentBModel) && (
+                <span className="text-[10px] text-red-400 mt-0.5 block font-medium">⚠️ HIGH RISK — slow on CPU</span>
+              )}
             </div>
 
             {/* Theme */}
