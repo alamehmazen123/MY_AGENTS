@@ -1,7 +1,22 @@
-"""cells/mcp/presets/git_mcp.py — Git operations."""
+"""cells/mcp/presets/git_mcp.py — Structured Git operations (workspace-jailed)."""
 import subprocess
 from pathlib import Path
+from kernel.security.workspace_guard import WorkspaceGuard, WorkspaceViolation
 from kernel.config import settings
+
+_guard = WorkspaceGuard(settings.workspace_root)
+
+SCHEMA = {
+    "name": "git_mcp",
+    "description": "Execute structured git commands inside the workspace.",
+    "parameters": {
+        "action": {"type": "string", "enum": ["status", "log", "diff", "branch", "show"]},
+        "path": {"type": "string"},
+        "n": {"type": "integer"},
+        "ref": {"type": "string"},
+    },
+    "required": ["action"],
+}
 
 
 def _git_cmd(args: list, cwd: str | None = None) -> dict:
@@ -21,7 +36,10 @@ def _git_cmd(args: list, cwd: str | None = None) -> dict:
 def handle(args: dict) -> dict:
     action = args.get("action", "status")
     path_str = args.get("path", str(settings.workspace_root))
-    cwd = Path(path_str).expanduser().resolve()
+    try:
+        cwd = _guard.validate(path_str)
+    except WorkspaceViolation as e:
+        return {"error": "workspace_violation", "message": str(e)}
 
     if action == "status":
         return _git_cmd(["status", "-sb"], str(cwd))

@@ -1,13 +1,28 @@
-"""cells/mcp/presets/file_explorer.py — Browse, read, write, and manage any file."""
+"""cells/mcp/presets/file_explorer.py — Browse, read, write, and manage workspace files."""
 from pathlib import Path
+from kernel.security.workspace_guard import WorkspaceGuard, WorkspaceViolation
+from kernel.config import settings
+
+_guard = WorkspaceGuard(settings.workspace_root)
+
+SCHEMA = {
+    "name": "file_explorer",
+    "description": "Browse, read, write, delete files and directories within the workspace.",
+    "parameters": {
+        "action": {"type": "string", "enum": ["read", "list", "stat", "write", "delete", "mkdir", "move"]},
+        "path": {"type": "string"},
+        "content": {"type": "string"},
+        "dest": {"type": "string"},
+    },
+    "required": ["action", "path"],
+}
 
 
-def _resolve_path(path_str: str) -> tuple[Path | None, dict | None]:
-    if not path_str:
-        return None, {"error": "missing_path"}
+def _resolve(path_str: str):
     try:
-        p = Path(path_str).expanduser().resolve()
-        return p, None
+        return _guard.validate(path_str)
+    except WorkspaceViolation as e:
+        return None, {"error": "workspace_violation", "message": str(e)}
     except Exception as e:
         return None, {"error": str(e)}
 
@@ -15,7 +30,7 @@ def _resolve_path(path_str: str) -> tuple[Path | None, dict | None]:
 def handle(args: dict) -> dict:
     action = args.get("action", "read")
     path_str = args.get("path", "")
-    p, err = _resolve_path(path_str)
+    p, err = _resolve(path_str)
     if err:
         return err
 
@@ -49,8 +64,7 @@ def handle(args: dict) -> dict:
                 return {"error": "not_found", "path": str(p)}
             st = p.stat()
             return {
-                "path": str(p),
-                "name": p.name,
+                "path": str(p), "name": p.name,
                 "type": "dir" if p.is_dir() else "file",
                 "size": st.st_size if p.is_file() else None,
                 "mtime": st.st_mtime,
@@ -58,8 +72,7 @@ def handle(args: dict) -> dict:
 
         elif action == "write":
             content = args.get("content", "")
-            if not p.parent.exists():
-                p.parent.mkdir(parents=True, exist_ok=True)
+            p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
             return {"success": True, "path": str(p), "bytes_written": len(content.encode("utf-8"))}
 
@@ -81,9 +94,9 @@ def handle(args: dict) -> dict:
             dest_str = args.get("dest", "")
             if not dest_str:
                 return {"error": "missing_dest"}
-            dest = Path(dest_str).expanduser().resolve()
-            if not dest.parent.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
+            dest, derr = _resolve(dest_str)
+            if derr:
+                return derr
             import shutil
             shutil.move(str(p), str(dest))
             return {"success": True, "src": str(p), "dest": str(dest)}

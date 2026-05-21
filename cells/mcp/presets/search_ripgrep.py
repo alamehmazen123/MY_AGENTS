@@ -1,8 +1,22 @@
-"""cells/mcp/presets/search_ripgrep.py — Search files with ripgrep or Python fallback."""
+"""cells/mcp/presets/search_ripgrep.py — Search text inside workspace files."""
 import os
 import re
 import subprocess
 from pathlib import Path
+from kernel.security.workspace_guard import WorkspaceGuard, WorkspaceViolation
+from kernel.config import settings
+
+_guard = WorkspaceGuard(settings.workspace_root)
+
+SCHEMA = {
+    "name": "search_ripgrep",
+    "description": "Search text inside workspace files using ripgrep or Python fallback.",
+    "parameters": {
+        "query": {"type": "string"},
+        "path": {"type": "string"},
+    },
+    "required": ["query"],
+}
 
 
 def handle(args: dict) -> dict:
@@ -11,9 +25,9 @@ def handle(args: dict) -> dict:
     if not query:
         return {"error": "missing_query"}
     try:
-        p = Path(path_str).expanduser().resolve()
+        p = _guard.validate(path_str)
         if not p.exists() or not p.is_dir():
-            return {"error": "not_a_directory"}
+            return {"error": "not_a_directory", "path": str(p)}
 
         # Try ripgrep first
         try:
@@ -31,7 +45,7 @@ def handle(args: dict) -> dict:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-        # Fallback to Python walk
+        # Fallback to Python walk (jailed)
         matches = []
         pattern = re.compile(re.escape(query))
         for root, _, files in os.walk(str(p)):
@@ -45,5 +59,7 @@ def handle(args: dict) -> dict:
                 except Exception:
                     pass
         return {"matches": matches, "tool": "python_fallback", "count": len(matches)}
+    except WorkspaceViolation as e:
+        return {"error": "workspace_violation", "message": str(e)}
     except Exception as e:
         return {"error": str(e)}
