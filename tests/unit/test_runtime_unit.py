@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import AsyncMock, patch
 from cells.runtime.queue import SprintQueue
 from cells.runtime.model_manager import ModelManager, ModelState
 from cells.runtime.circuit_breaker import CircuitBreaker
@@ -17,10 +18,24 @@ async def test_queue_priority():
 @pytest.mark.asyncio
 async def test_model_manager():
     m = ModelManager()
-    assert await m.load("model_a")
-    assert m.get_active() == "model_a"
-    assert await m.switch("model_a", "model_b")
-    assert m.get_active() == "model_b"
+
+    # Mock Ollama HTTP responses so the test works offline
+    mock_response = AsyncMock()
+    mock_response.status_code = 200
+    mock_response.json = AsyncMock(return_value={"response": "ok", "done": True})
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value = mock_client
+
+        assert await m.load("model_a")
+        assert m.get_active() == "model_a"
+        assert await m.switch("model_a", "model_b")
+        assert m.get_active() == "model_b"
 
 
 def test_circuit_breaker():

@@ -20,7 +20,7 @@ SCHEMA = {
 
 def _resolve(path_str: str):
     try:
-        return _guard.validate(path_str)
+        return _guard.validate(path_str), None
     except WorkspaceViolation as e:
         return None, {"error": "workspace_violation", "message": str(e)}
     except Exception as e:
