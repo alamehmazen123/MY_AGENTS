@@ -11,7 +11,7 @@ export interface AgentMessage {
 
 export interface AgentState {
   messages: AgentMessage[]
-  status: 'idle' | 'online' | 'working' | 'waiting' | 'paused'
+  status: 'idle' | 'online' | 'working' | 'waiting' | 'paused' | 'disabled'
   model: string
 }
 
@@ -33,7 +33,9 @@ export interface Session {
 export interface SessionState {
   sessions: Session[]
   activeSessionId: string
+  isGenerating: boolean
   sendPrompt: (text: string, opts?: { files?: AttachedFile[]; folder?: string }) => void
+  abortGeneration: () => void
   createSession: () => void
   switchSession: (id: string) => void
   deleteSession: (id: string) => void
@@ -46,19 +48,40 @@ function makeId() {
   return `msg-${++msgId}-${Date.now()}`
 }
 
+let currentAbortController: AbortController | null = null
+
 async function callOllama(
   prompt: string,
   model: string,
   system?: string,
-  opts?: { workspaceFolder?: string; attachedFiles?: AttachedFile[]; enableTools?: boolean }
+  opts?: {
+    workspaceFolder?: string
+    attachedFiles?: AttachedFile[]
+    enableTools?: boolean
+    temperature?: number
+    contextLength?: number
+    signal?: AbortSignal
+  }
 ): Promise<string> {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), 185_000)
+
+  if (opts?.signal) {
+    const onAbort = () => {
+      clearTimeout(timeoutId)
+      controller.abort()
+    }
+    opts.signal.addEventListener('abort', onAbort, { once: true })
+  }
+
   try {
     const body: any = { prompt, model, system }
     if (opts?.workspaceFolder) body.workspace_folder = opts.workspaceFolder
-    if (opts?.attachedFiles) body.attached_files = opts.attachedFiles.map(f => f.name)
+    if (opts?.attachedFiles) body.attached_files = opts.attachedFiles.map((f) => f.name)
     if (opts?.enableTools === false) body.no_tools = true
+    if (opts?.temperature !== undefined) body.temperature = opts.temperature
+    if (opts?.contextLength) body.context_length = opts.contextLength
+
     const res = await fetch('/api/prompt', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -78,6 +101,9 @@ async function callOllama(
   } catch (e: any) {
     clearTimeout(timeoutId)
     if (e.name === 'AbortError') {
+      if (opts?.signal?.aborted) {
+        return '[Stopped by user]'
+      }
       return '[Error: Request timed out after 185s. The model may be overloaded or Ollama is not responding.]'
     }
     return `[Error: ${e.message}]`
@@ -128,8 +154,8 @@ function makeSession(id: string, name: string): Session {
     },
     agentB: {
       messages: [],
-      status: 'waiting',
-      model: settings.agentBModel,
+      status: settings.agentBModel ? 'waiting' : 'disabled',
+      model: settings.agentBModel || '',
     },
     attachedFiles: [],
     workspaceFolder: '',
@@ -141,6 +167,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
   return {
     sessions: [initial],
     activeSessionId: initial.id,
+    isGenerating: false,
 
     createSession: () => {
       const id = `sess-${Date.now()}`
@@ -173,11 +200,41 @@ export const useSessionStore = create<SessionState>((set, get) => {
             ? {
                 ...sess,
                 agentA: { ...sess.agentA, model: settings.agentAModel },
-                agentB: { ...sess.agentB, model: settings.agentBModel },
+                agentB: {
+                  ...sess.agentB,
+                  model: settings.agentBModel || '',
+                  status: settings.agentBModel ? sess.agentB.status : 'disabled',
+                },
               }
             : sess
         ),
       }))
+    },
+
+    abortGeneration: () => {
+      if (currentAbortController) {
+        currentAbortController.abort()
+        currentAbortController = null
+      }
+      set((s) => {
+        const session = s.sessions.find((x) => x.id === s.activeSessionId)
+        if (!session) return { isGenerating: false }
+        return {
+          isGenerating: false,
+          sessions: s.sessions.map((sess) =>
+            sess.id === s.activeSessionId
+              ? {
+                  ...sess,
+                  agentA: { ...sess.agentA, status: 'online' },
+                  agentB: {
+                    ...sess.agentB,
+                    status: sess.agentB.status === 'working' ? 'waiting' : sess.agentB.status,
+                  },
+                }
+              : sess
+          ),
+        }
+      })
     },
 
     sendPrompt: async (text: string, opts = {}) => {
@@ -188,8 +245,8 @@ export const useSessionStore = create<SessionState>((set, get) => {
       const settings = useSettingsStore.getState()
       const files = opts.files ?? session.attachedFiles
       const folder = opts.folder ?? session.workspaceFolder
+      const isBEnabled = !!settings.agentBModel && settings.preset !== 'CHAT'
 
-      // Build the full prompt with file contents
       const fullPrompt = buildPrompt(text, files, folder)
 
       const userMsg: AgentMessage = {
@@ -199,7 +256,10 @@ export const useSessionStore = create<SessionState>((set, get) => {
         timestamp: Date.now(),
       }
 
-      // Update session
+      const abortCtrl = new AbortController()
+      currentAbortController = abortCtrl
+      set({ isGenerating: true })
+
       const updatedA: AgentState = {
         ...session.agentA,
         messages: [...session.agentA.messages, userMsg],
@@ -208,8 +268,8 @@ export const useSessionStore = create<SessionState>((set, get) => {
       }
       const updatedB: AgentState = {
         ...session.agentB,
-        status: 'waiting',
-        model: settings.agentBModel,
+        status: isBEnabled ? 'waiting' : 'disabled',
+        model: isBEnabled ? settings.agentBModel : '',
       }
       set((s) => ({
         sessions: s.sessions.map((sess) =>
@@ -219,36 +279,82 @@ export const useSessionStore = create<SessionState>((set, get) => {
         ),
       }))
 
-      // ── Phase 1: Agent-A reasons ──
-      const systemA =
-        'You are an expert coding assistant. You have access to the attached files and workspace folder shown in the prompt, plus local file tools. Read files carefully before answering. Only provide factual, accurate information. If unsure, say so.'
-      const responseA = await callOllama(fullPrompt, settings.agentAModel, systemA, {
-        workspaceFolder: folder,
-        attachedFiles: files,
-        enableTools: true,
-      })
+      const isAborted = () => abortCtrl.signal.aborted
 
-      const aDone: AgentState = {
-        ...updatedA,
-        messages: [
-          ...updatedA.messages,
-          { id: makeId(), role: 'agent', text: responseA, timestamp: Date.now() },
-        ],
-        status: 'online',
-      }
-      const bReady: AgentState = {
-        ...updatedB,
-        status: 'working',
-      }
-      set((s) => ({
-        sessions: s.sessions.map((sess) =>
-          sess.id === s.activeSessionId ? { ...sess, agentA: aDone, agentB: bReady } : sess
-        ),
-      }))
+      try {
+        // ── Phase 1: Agent-A reasons ──
+        const responseA = await callOllama(fullPrompt, settings.agentAModel, settings.systemPromptA, {
+          workspaceFolder: folder,
+          attachedFiles: files,
+          enableTools: settings.mcpToolsEnabled,
+          temperature: settings.temperatureA,
+          contextLength: settings.contextLength,
+          signal: abortCtrl.signal,
+        })
 
-      // ── Phase 2: Agent-B reviews ──
-      const truncatedA = truncate(responseA, 4000)
-      const reviewPrompt = `You are a senior code reviewer. The user asked:
+        if (isAborted() || responseA === '[Stopped by user]') {
+          set((s) => {
+            const sess = s.sessions.find((x) => x.id === s.activeSessionId)
+            if (!sess) return s
+            const stoppedMsg: AgentMessage = {
+              id: makeId(),
+              role: 'system',
+              text: '⏹ Generation stopped by user.',
+              timestamp: Date.now(),
+            }
+            return {
+              sessions: s.sessions.map((sess) =>
+                sess.id === s.activeSessionId
+                  ? {
+                      ...sess,
+                      agentA: {
+                        ...sess.agentA,
+                        status: 'online',
+                        messages: [...sess.agentA.messages, stoppedMsg],
+                      },
+                      agentB: {
+                        ...sess.agentB,
+                        status: sess.agentB.status === 'working' ? 'waiting' : sess.agentB.status,
+                      },
+                    }
+                  : sess
+              ),
+            }
+          })
+          return
+        }
+
+        const aDone: AgentState = {
+          ...updatedA,
+          messages: [
+            ...updatedA.messages,
+            { id: makeId(), role: 'agent', text: responseA, timestamp: Date.now() },
+          ],
+          status: 'online',
+        }
+
+        if (!isBEnabled) {
+          set((s) => ({
+            sessions: s.sessions.map((sess) =>
+              sess.id === s.activeSessionId ? { ...sess, agentA: aDone } : sess
+            ),
+          }))
+          return
+        }
+
+        const bReady: AgentState = {
+          ...updatedB,
+          status: 'working',
+        }
+        set((s) => ({
+          sessions: s.sessions.map((sess) =>
+            sess.id === s.activeSessionId ? { ...sess, agentA: aDone, agentB: bReady } : sess
+          ),
+        }))
+
+        // ── Phase 2: Agent-B reviews ──
+        const truncatedA = truncate(responseA, 4000)
+        const reviewPrompt = `You are a senior code reviewer. The user asked:
 
 """${text}"""
 
@@ -258,26 +364,60 @@ Another agent responded with:
 
 Your task: Review the response above. Identify any bugs, errors, hallucinations, or incorrect assumptions. Then provide YOUR OWN corrected and improved answer. Be concise but thorough. Do NOT repeat raw JSON or error messages verbatim.`
 
-      const systemB =
-        'You are a senior code reviewer. Be critical and thorough. Point out mistakes and provide corrected answers. Never repeat raw JSON dumps.'
-      const responseB = await callOllama(reviewPrompt, settings.agentBModel, systemB, {
-        enableTools: false,
-      })
+        const responseB = await callOllama(reviewPrompt, settings.agentBModel, settings.systemPromptB, {
+          enableTools: false,
+          temperature: settings.temperatureB,
+          contextLength: settings.contextLength,
+          signal: abortCtrl.signal,
+        })
 
-      const bDone: AgentState = {
-        ...bReady,
-        messages: [
-          ...bReady.messages,
-          { id: makeId(), role: 'context', text: `Agent-A said:\n${truncate(responseA, 800)}`, timestamp: Date.now() },
-          { id: makeId(), role: 'agent', text: responseB, timestamp: Date.now() },
-        ],
-        status: 'online',
+        if (isAborted() || responseB === '[Stopped by user]') {
+          set((s) => {
+            const sess = s.sessions.find((x) => x.id === s.activeSessionId)
+            if (!sess) return s
+            const stoppedMsg: AgentMessage = {
+              id: makeId(),
+              role: 'system',
+              text: '⏹ Generation stopped by user during review.',
+              timestamp: Date.now(),
+            }
+            return {
+              sessions: s.sessions.map((sess) =>
+                sess.id === s.activeSessionId
+                  ? {
+                      ...sess,
+                      agentA: { ...sess.agentA, status: 'online' },
+                      agentB: {
+                        ...sess.agentB,
+                        status: 'waiting',
+                        messages: [...sess.agentB.messages, stoppedMsg],
+                      },
+                    }
+                  : sess
+              ),
+            }
+          })
+          return
+        }
+
+        const bDone: AgentState = {
+          ...bReady,
+          messages: [
+            ...bReady.messages,
+            { id: makeId(), role: 'context', text: `Agent-A said:\n${truncate(responseA, 800)}`, timestamp: Date.now() },
+            { id: makeId(), role: 'agent', text: responseB, timestamp: Date.now() },
+          ],
+          status: 'online',
+        }
+        set((s) => ({
+          sessions: s.sessions.map((sess) =>
+            sess.id === s.activeSessionId ? { ...sess, agentB: bDone } : sess
+          ),
+        }))
+      } finally {
+        currentAbortController = null
+        set({ isGenerating: false })
       }
-      set((s) => ({
-        sessions: s.sessions.map((sess) =>
-          sess.id === s.activeSessionId ? { ...sess, agentB: bDone } : sess
-        ),
-      }))
     },
 
     clear: () =>

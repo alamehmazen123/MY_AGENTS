@@ -1,21 +1,144 @@
 import { create } from 'zustand'
 
 export type Theme = 'system' | 'dark' | 'light'
+export type PresetName = 'CHAT' | 'REVIEWING' | 'CODING' | 'SUPER_CODING' | 'EXECUTION' | 'CUSTOM'
 
-interface SettingsState {
-  theme: Theme
-  agentAModel: string
-  agentBModel: string
-  availableModels: string[]
-  mcpEnabled: Record<string, boolean>
-  setTheme: (t: Theme) => void
-  setAgentAModel: (m: string) => void
-  setAgentBModel: (m: string) => void
-  setAvailableModels: (models: string[]) => void
-  setMcpEnabled: (name: string, enabled: boolean) => void
-  fetchModels: () => Promise<void>
-  applyTheme: () => void
+export interface PresetConfig {
+  name: string
+  description: string
+  agentA: {
+    name: string
+    contextLength: number
+    temperature: number
+    systemPrompt: string
+  }
+  agentB: {
+    name: string
+    contextLength: number
+    temperature: number
+    systemPrompt: string
+  } | null
+  mcpToolsEnabled: boolean
 }
+
+export const PRESETS: Record<PresetName, PresetConfig> = {
+  CHAT: {
+    name: 'CHAT',
+    description: 'General conversation, no code execution. ~2.5 GB RAM, 10-18 tok/s.',
+    agentA: {
+      name: 'qwen3:4b',
+      contextLength: 4096,
+      temperature: 0.7,
+      systemPrompt: 'You are a helpful assistant. Respond clearly and concisely to user questions.',
+    },
+    agentB: null,
+    mcpToolsEnabled: false,
+  },
+  REVIEWING: {
+    name: 'REVIEWING',
+    description: 'Fast response + deep quality review. ~6.0 GB RAM.',
+    agentA: {
+      name: 'qwen3:1.7b',
+      contextLength: 4096,
+      temperature: 0.7,
+      systemPrompt: 'You are a content creator. Write a draft response to the user request.',
+    },
+    agentB: {
+      name: 'qwen3:8b',
+      contextLength: 4096,
+      temperature: 0.3,
+      systemPrompt: 'You are a senior editor. Review the draft and provide specific improvements. Focus on clarity, accuracy, and completeness. Output the improved version only.',
+    },
+    mcpToolsEnabled: false,
+  },
+  CODING: {
+    name: 'CODING',
+    description: 'Fast code generation + quality review. ~5.5 GB RAM.',
+    agentA: {
+      name: 'deepseek-coder:1.3b',
+      contextLength: 8192,
+      temperature: 0.2,
+      systemPrompt: 'You are an expert programmer. Write clean, efficient, well-commented code. Include error handling. Use the best practices for the requested language.',
+    },
+    agentB: {
+      name: 'qwen2.5-coder:7b',
+      contextLength: 8192,
+      temperature: 0.3,
+      systemPrompt: 'You are a code reviewer. Review the code for bugs, security issues, and optimization opportunities. Provide the corrected/improved version with explanations.',
+    },
+    mcpToolsEnabled: true,
+  },
+  SUPER_CODING: {
+    name: 'SUPER_CODING',
+    description: 'Quality generation + ultimate review. ~5.7 GB RAM.',
+    agentA: {
+      name: 'qwen2.5-coder:3b',
+      contextLength: 8192,
+      temperature: 0.2,
+      systemPrompt: 'You are a senior software architect. Design and implement robust, scalable solutions. Consider edge cases, error handling, and maintainability.',
+    },
+    agentB: {
+      name: 'deepseek-coder:6.7b',
+      contextLength: 8192,
+      temperature: 0.3,
+      systemPrompt: 'You are a principal engineer. Critically review the architecture and implementation. Check for design patterns, security vulnerabilities, performance bottlenecks, and code smells. Provide refactored version with detailed feedback.',
+    },
+    mcpToolsEnabled: true,
+  },
+  EXECUTION: {
+    name: 'EXECUTION',
+    description: 'Automated code execution and verification. ~3.3 GB RAM.',
+    agentA: {
+      name: 'deepseek-coder:1.3b',
+      contextLength: 16384,
+      temperature: 0.1,
+      systemPrompt: 'You are a code execution agent. Your job is to: 1. Analyze the user request 2. Write the EXACT code needed 3. Execute via MCP tools 4. Report results (success/failure, output, errors). Always verify file paths and handle errors gracefully.',
+    },
+    agentB: {
+      name: 'qwen3:4b',
+      contextLength: 16384,
+      temperature: 0.2,
+      systemPrompt: 'You are a verification agent. Check the execution results from Agent-A. If errors exist, diagnose the root cause and suggest fixes. If successful, verify the output meets the original requirements.',
+    },
+    mcpToolsEnabled: true,
+  },
+  CUSTOM: {
+    name: 'CUSTOM',
+    description: 'User-defined configuration.',
+    agentA: {
+      name: 'deepseek-coder:latest',
+      contextLength: 8192,
+      temperature: 0.7,
+      systemPrompt: 'You are a helpful AI coding assistant. Answer precisely and accurately.',
+    },
+    agentB: {
+      name: 'qwen2.5-coder:14b',
+      contextLength: 8192,
+      temperature: 0.3,
+      systemPrompt: 'You are a senior code reviewer. Review the other agent response carefully.',
+    },
+    mcpToolsEnabled: true,
+  },
+}
+
+export const HIGH_RISK_MODELS = ['deepseek-r1:8b', 'qwen2.5-coder:14b', 'gpt-oss:20b']
+
+export const ALL_MODELS = [
+  'tinyllama',
+  'qwen3:1.7b',
+  'qwen3:4b',
+  'qwen3:8b',
+  'qwen2.5-coder:3b',
+  'qwen2.5-coder:7b',
+  'deepseek-coder:1.3b',
+  'deepseek-coder:6.7b',
+  'deepseek-coder:latest',
+  'qwen2.5-coder:14b',
+  'llama3:8b',
+  'phi4:14b',
+  'deepseek-r1:8b',
+  'gpt-oss:20b',
+]
 
 const MCP_PRESETS = [
   'file_explorer', 'code_analyzer', 'git_mcp', 'search_ripgrep',
@@ -27,6 +150,16 @@ const MCP_PRESETS = [
 const defaultMcpEnabled: Record<string, boolean> = {}
 MCP_PRESETS.forEach((name) => { defaultMcpEnabled[name] = true })
 
+const STORAGE_KEY = 'my_agents_settings_v2'
+
+function loadPersisted(): Partial<SettingsState> | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) return JSON.parse(raw)
+  } catch {}
+  return null
+}
+
 function getSystemTheme(): 'dark' | 'light' {
   if (typeof window !== 'undefined') {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
@@ -34,53 +167,144 @@ function getSystemTheme(): 'dark' | 'light' {
   return 'dark'
 }
 
-export const useSettingsStore = create<SettingsState>((set, get) => ({
-  theme: 'dark',
-  agentAModel: 'deepseek-coder:latest',
-  agentBModel: 'qwen2.5-coder:14b',
-  availableModels: [
-    'deepseek-coder:latest',
-    'qwen2.5-coder:14b',
-    'llama3:8b',
-    'phi4:14b',
-  ],
-  mcpEnabled: { ...defaultMcpEnabled },
+interface SettingsState {
+  theme: Theme
+  preset: PresetName
+  agentAModel: string
+  agentBModel: string
+  temperatureA: number
+  temperatureB: number
+  systemPromptA: string
+  systemPromptB: string
+  contextLength: number
+  mcpToolsEnabled: boolean
+  availableModels: string[]
+  mcpEnabled: Record<string, boolean>
+  setTheme: (t: Theme) => void
+  setPreset: (p: PresetName) => void
+  setAgentAModel: (m: string) => void
+  setAgentBModel: (m: string) => void
+  setTemperatureA: (v: number) => void
+  setTemperatureB: (v: number) => void
+  setSystemPromptA: (v: string) => void
+  setSystemPromptB: (v: string) => void
+  setContextLength: (v: number) => void
+  setMcpToolsEnabled: (v: boolean) => void
+  setMcpEnabled: (name: string, enabled: boolean) => void
+  fetchModels: () => Promise<void>
+  applyTheme: () => void
+}
 
-  setTheme: (theme) => {
-    set({ theme })
-    // Defer DOM update to next tick so React doesn't complain during render
-    setTimeout(() => get().applyTheme(), 0)
-  },
-  setAgentAModel: (agentAModel) => set({ agentAModel }),
-  setAgentBModel: (agentBModel) => set({ agentBModel }),
-  setAvailableModels: (availableModels) => set({ availableModels }),
-  setMcpEnabled: (name, enabled) =>
-    set((s) => ({ mcpEnabled: { ...s.mcpEnabled, [name]: enabled } })),
+const persisted = loadPersisted()
 
-  fetchModels: async () => {
-    try {
-      const res = await fetch('/api/models')
-      if (res.ok) {
-        const data = await res.json()
-        if (data.models && data.models.length > 0) {
-          set({ availableModels: data.models })
-        }
+export const useSettingsStore = create<SettingsState>((set, get) => {
+  const defaults = PRESETS.CODING
+  const initial: SettingsState = {
+    theme: 'dark',
+    preset: 'CODING',
+    agentAModel: defaults.agentA.name,
+    agentBModel: defaults.agentB?.name || '',
+    temperatureA: defaults.agentA.temperature,
+    temperatureB: defaults.agentB?.temperature ?? 0.3,
+    systemPromptA: defaults.agentA.systemPrompt,
+    systemPromptB: defaults.agentB?.systemPrompt ?? '',
+    contextLength: defaults.agentA.contextLength,
+    mcpToolsEnabled: defaults.mcpToolsEnabled,
+    availableModels: ALL_MODELS,
+    mcpEnabled: { ...defaultMcpEnabled },
+    ...persisted,
+
+    setTheme: (theme) => {
+      set({ theme })
+      setTimeout(() => get().applyTheme(), 0)
+    },
+
+    setPreset: (presetName) => {
+      if (presetName === 'CUSTOM') {
+        set({ preset: presetName })
+        return
       }
-    } catch {
-      // fallback to defaults
-    }
-  },
+      const p = PRESETS[presetName]
+      set({
+        preset: presetName,
+        agentAModel: p.agentA.name,
+        agentBModel: p.agentB?.name || '',
+        temperatureA: p.agentA.temperature,
+        temperatureB: p.agentB?.temperature ?? 0.3,
+        systemPromptA: p.agentA.systemPrompt,
+        systemPromptB: p.agentB?.systemPrompt ?? '',
+        contextLength: p.agentA.contextLength,
+        mcpToolsEnabled: p.mcpToolsEnabled,
+      })
+    },
 
-  applyTheme: () => {
-    const t = get().theme
-    const effective = t === 'system' ? getSystemTheme() : t
-    const root = document.documentElement
-    if (effective === 'dark') {
-      root.classList.add('dark')
-      root.classList.remove('light')
-    } else {
-      root.classList.remove('dark')
-      root.classList.add('light')
-    }
-  },
-}))
+    setAgentAModel: (agentAModel) => set({ agentAModel, preset: 'CUSTOM' }),
+    setAgentBModel: (agentBModel) => set({ agentBModel, preset: 'CUSTOM' }),
+    setTemperatureA: (temperatureA) => set({ temperatureA, preset: 'CUSTOM' }),
+    setTemperatureB: (temperatureB) => set({ temperatureB, preset: 'CUSTOM' }),
+    setSystemPromptA: (systemPromptA) => set({ systemPromptA, preset: 'CUSTOM' }),
+    setSystemPromptB: (systemPromptB) => set({ systemPromptB, preset: 'CUSTOM' }),
+    setContextLength: (contextLength) => set({ contextLength, preset: 'CUSTOM' }),
+    setMcpToolsEnabled: (mcpToolsEnabled) => set({ mcpToolsEnabled, preset: 'CUSTOM' }),
+
+    setMcpEnabled: (name, enabled) =>
+      set((s) => {
+        const next = { ...s.mcpEnabled, [name]: enabled }
+        return { mcpEnabled: next, preset: 'CUSTOM' as PresetName }
+      }),
+
+    fetchModels: async () => {
+      try {
+        const res = await fetch('/api/models')
+        if (res.ok) {
+          const data = await res.json()
+          if (data.models && data.models.length > 0) {
+            const merged = Array.from(new Set([...get().availableModels, ...data.models]))
+            set({ availableModels: merged })
+          }
+        }
+      } catch {
+        // fallback
+      }
+    },
+
+    applyTheme: () => {
+      const t = get().theme
+      const effective = t === 'system' ? getSystemTheme() : t
+      const root = document.documentElement
+      if (effective === 'dark') {
+        root.classList.add('dark')
+        root.classList.remove('light')
+      } else {
+        root.classList.remove('dark')
+        root.classList.add('light')
+      }
+    },
+  }
+
+  return initial
+})
+
+// Persist to localStorage on every change (debounced)
+if (typeof window !== 'undefined') {
+  let timeout: ReturnType<typeof setTimeout>
+  useSettingsStore.subscribe((state) => {
+    clearTimeout(timeout)
+    timeout = setTimeout(() => {
+      const snapshot = {
+        theme: state.theme,
+        preset: state.preset,
+        agentAModel: state.agentAModel,
+        agentBModel: state.agentBModel,
+        temperatureA: state.temperatureA,
+        temperatureB: state.temperatureB,
+        systemPromptA: state.systemPromptA,
+        systemPromptB: state.systemPromptB,
+        contextLength: state.contextLength,
+        mcpToolsEnabled: state.mcpToolsEnabled,
+        mcpEnabled: state.mcpEnabled,
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot))
+    }, 100)
+  })
+}
