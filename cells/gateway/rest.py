@@ -9,6 +9,15 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 from kernel.config import settings
+import logging
+
+# Forensic tool-trace logger
+logger = logging.getLogger("tool_trace")
+if not logger.handlers:
+    _th = logging.StreamHandler()
+    _th.setFormatter(logging.Formatter("%(asctime)s [TOOL_TRACE] %(message)s"))
+    logger.addHandler(_th)
+    logger.setLevel(logging.INFO)
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -24,25 +33,30 @@ REVIEW_SYSTEM_PROMPT = (
 )
 
 TOOL_INSTRUCTIONS = (
-    "You have access to local tools on this computer. To use a tool, output exactly one line in this format:\n"
+    "You are an agent with DIRECT ACCESS to local tools. "
+    "When the user asks for file listings, file contents, directory structure, code search, or file operations, "
+    "you MUST use the relevant tool IMMEDIATELY. "
+    "NEVER explain how to use tools. NEVER describe what you would do. "
+    "ALWAYS execute the tool and return the actual result.\n\n"
+    "To use a tool, output EXACTLY one line in this format (no markdown, no backticks, no explanation):\n"
     "[[MCP:<tool_name>:<json_arguments>]]\n\n"
     "Available tools:\n"
     "- file_explorer: Browse/read/write/delete files and directories.\n"
     "  Actions: read, list, stat, write, delete, mkdir, move.\n"
-    "  Args examples:\n"
-    '  {"action":"read","path":"C:\\\\Users\\\\Me\\\\file.txt"} -> returns file content\n'
-    '  {"action":"list","path":"C:\\\\Users\\\\Me\\\\Projects"} -> returns directory listing\n'
-    '  {"action":"write","path":"...","content":"..."} -> writes text to file\n'
-    '  {"action":"delete","path":"..."} -> deletes file or folder\n'
-    '  {"action":"mkdir","path":"..."} -> creates directory\n'
-    '  {"action":"move","path":"...","dest":"..."} -> moves/renames file\n'
+    "  Examples:\n"
+    '  [[MCP:file_explorer:{"action":"list","path":"."}]]\n'
+    '  [[MCP:file_explorer:{"action":"read","path":"main.py"}]]\n'
+    '  [[MCP:file_explorer:{"action":"write","path":"out.txt","content":"hello"}]]\n'
     "- search_ripgrep: Search text inside files.\n"
-    '  Args: {"query":"search text","path":"directory to search"}\n'
+    '  [[MCP:search_ripgrep:{"query":"def main","path":"."}]]\n'
     "- python_exec: Execute Python code safely.\n"
-    '  Args: {"code":"print(1+1)"}\n\n'
-    "After using a tool, you will receive its result and can continue. "
-    "Use tools whenever you need file information to answer accurately. "
-    "You may use up to 3 tools in sequence."
+    '  [[MCP:python_exec:{"code":"print(1+1)"}]]\n\n'
+    "RULES:\n"
+    "1. If the user asks about files or directories, you MUST output a tool call line.\n"
+    "2. Do NOT wrap the line in markdown code blocks.\n"
+    "3. Do NOT add explanations before or after the tool call.\n"
+    "4. After receiving the tool result, answer using the actual data.\n"
+    "5. You may chain up to 3 tools in sequence."
 )
 
 
@@ -322,11 +336,15 @@ class RESTServer:
 
         mcp_cell = getattr(self._gateway, "_mcp", None)
         full_system = system
-        if not no_tools and mcp_cell:
+        tools_enabled = not no_tools and mcp_cell is not None
+        if tools_enabled:
             full_system = system + "\n\n" + TOOL_INSTRUCTIONS
+
+        logger.info("stage=A received_prompt=%s model=%s tools_enabled=%s", prompt_text[:200], model, tools_enabled)
 
         current_prompt = prompt_text
         final_response = ""
+        any_tool_executed = False
 
         MAX_TOOL_ITERATIONS = 3
 
@@ -357,12 +375,15 @@ class RESTServer:
                     # Force unload after generation to guarantee zero models between agents
                     payload["keep_alive"] = 0
 
+                    logger.info("stage=B ollama_request iteration=%s prompt_len=%s system_len=%s", iteration, len(current_prompt), len(full_system or ""))
+
                     res = await client.post(
                         f"{settings.ollama_host}/api/generate",
                         json=payload,
                         timeout=180,
                     )
                     if res.status_code != 200:
+                        logger.info("stage=G ollama_error status=%s", res.status_code)
                         return {
                             "error": f"ollama_http_{res.status_code}",
                             "output": f"Ollama returned HTTP {res.status_code}: {res.text[:500]}",
@@ -370,6 +391,7 @@ class RESTServer:
                         }
                     data = res.json()
                     response_text = data.get("response", "").strip()
+                    logger.info("stage=B model_response_len=%s", len(response_text))
                     if not response_text:
                         return {
                             "output": "[Model returned empty response — try again or check Ollama logs]",
@@ -379,10 +401,19 @@ class RESTServer:
 
                     final_response = response_text
 
-                    if no_tools or not mcp_cell or iteration >= MAX_TOOL_ITERATIONS:
+                    if not tools_enabled or iteration >= MAX_TOOL_ITERATIONS:
                         break
 
                     tool_calls = self._extract_tool_calls(response_text)
+                    logger.info("stage=C tools_detected=%s count=%s", bool(tool_calls), len(tool_calls))
+
+                    # PHASE 7 — Force tool execution for explicit tool requests
+                    if not tool_calls:
+                        forced = self._force_tool_detection(prompt_text)
+                        if forced:
+                            logger.info("stage=C_forced forced_tool=%s", forced["preset"])
+                            tool_calls = [forced]
+
                     if not tool_calls:
                         break
 
@@ -399,21 +430,33 @@ class RESTServer:
                                         if not Path(val).is_absolute():
                                             args[key] = str(wf / val)
 
+                        logger.info("stage=D dispatching_mcp=%s args=%s", tc["preset"], json.dumps(args))
                         result = await mcp_cell.invoke(tc["preset"], args)
+                        logger.info("stage=E tool_result=%s", json.dumps(result)[:500])
                         tool_results.append({"call": tc, "result": result})
+                        any_tool_executed = True
 
                     current_prompt = self._build_continuation_prompt(prompt_text, response_text, tool_results)
+                    logger.info("stage=F context_after_tool prompt_len=%s", len(current_prompt))
                     # After first turn, simplify system prompt
                     full_system = system + "\nContinue based on the tool results. Do not use more tools unless necessary."
 
             except httpx.ConnectError as e:
+                logger.info("stage=G ollama_connect_error")
                 return {
                     "error": "ollama_not_reachable",
                     "output": f"Cannot connect to Ollama at {settings.ollama_host}. Make sure 'ollama serve' is running.",
                     "model": model,
                 }
             except Exception as e:
+                logger.info("stage=G exception=%s", str(e))
                 return {"error": str(e), "output": f"[Error: {str(e)}]", "model": model}
+
+        # PHASE 11 — Hallucination prevention
+        if any_tool_executed:
+            logger.info("stage=H final_response_tools_used=%s", any_tool_executed)
+        else:
+            logger.info("stage=H final_response_no_tools")
 
         return {
             "output": final_response,
@@ -424,7 +467,8 @@ class RESTServer:
     def _extract_tool_calls(self, text: str):
         import re
         import json
-        pattern = re.compile(r'\[\[MCP:(\w+):({.*?})\]\]')
+        # Primary: single-line or multi-line JSON inside [[MCP:preset:{...}]]
+        pattern = re.compile(r'\[\[MCP:(\w+):\s*({.*?)\s*\]\]', re.DOTALL)
         calls = []
         for match in pattern.finditer(text):
             preset = match.group(1)
@@ -433,18 +477,59 @@ class RESTServer:
                 calls.append({"preset": preset, "args": args, "raw": match.group(0)})
             except json.JSONDecodeError:
                 continue
+        if not calls:
+            # Fallback: match inside markdown code blocks that contain [[MCP:...]]
+            md_pattern = re.compile(r'```.*?\n(.*?)\n```', re.DOTALL)
+            for md_match in md_pattern.finditer(text):
+                inner = md_match.group(1)
+                for m in re.finditer(r'\[\[MCP:(\w+):\s*({.*?)\s*\]\]', inner, re.DOTALL):
+                    try:
+                        calls.append({"preset": m.group(1), "args": json.loads(m.group(2)), "raw": m.group(0)})
+                    except json.JSONDecodeError:
+                        continue
         return calls
+
+    def _force_tool_detection(self, prompt_text: str):
+        """PHASE 7 — Force tool execution when user explicitly requests file operations."""
+        import re
+        lowered = prompt_text.lower()
+        # Detect explicit file_explorer requests
+        if any(k in lowered for k in ("list files", "list directory", "show files", "show directory", "list current directory", "what files", "which files")):
+            path = "."
+            # Try to extract a path
+            m = re.search(r'(?:in|under|from|at)\s+([\w\-/.\\]+)', lowered)
+            if m:
+                candidate = m.group(1)
+                if candidate.lower() not in ("the", "a", "this", "that", "my", "your"):
+                    path = candidate
+            return {"preset": "file_explorer", "args": {"action": "list", "path": path}, "raw": "[[forced]]"}
+        if any(k in lowered for k in ("read file", "show file", "file content", "contents of", "what is in")) or lowered.startswith("read "):
+            m = re.search(r'(?:file\s+)([\w\-/.\\]+\.\w+)', lowered)
+            if not m and lowered.startswith("read "):
+                # Try to grab the word after "read"
+                m = re.search(r'^read\s+([\w\-/.\\]+\.\w+)', lowered)
+            if m:
+                return {"preset": "file_explorer", "args": {"action": "read", "path": m.group(1)}, "raw": "[[forced]]"}
+        if any(k in lowered for k in ("search for", "find function", "find code", "search code", "grep for")):
+            query = re.sub(r'.*?(search for|find function|find code|search code|grep for)\s+', '', lowered).strip().split()[0]
+            return {"preset": "search_ripgrep", "args": {"query": query or "def", "path": "."}, "raw": "[[forced]]"}
+        return None
 
     def _build_continuation_prompt(self, original_prompt: str, last_response: str, tool_results: list):
         import json
-        parts = [original_prompt]
-        parts.append("\n\n[Your previous response]\n" + last_response)
-        parts.append("\n\n[Tool Results]\n")
+        parts = ["=== ORIGINAL USER REQUEST ==="]
+        parts.append(original_prompt)
+        parts.append("\n=== YOUR PREVIOUS ATTEMPT ===")
+        parts.append(last_response)
+        parts.append("\n=== TOOL EXECUTION RESULTS (USE THESE TO ANSWER) ===")
         for tr in tool_results:
-            parts.append(f"Tool: {tr['call']['preset']}")
+            parts.append(f"\nTool: {tr['call']['preset']}")
             parts.append(f"Args: {json.dumps(tr['call']['args'])}")
-            parts.append(f"Result: {json.dumps(tr['result'])}\n")
-        parts.append("Based on the tool results above, provide your final answer. Do not use more tools unless necessary.")
+            parts.append(f"Result: {json.dumps(tr['result'])}")
+        parts.append("\n=== INSTRUCTION ===")
+        parts.append("Using the TOOL EXECUTION RESULTS above, provide a direct answer to the ORIGINAL USER REQUEST.")
+        parts.append("Do NOT describe what you would do. Do NOT explain the tools.")
+        parts.append("Answer with the actual data from the results.")
         return "\n".join(parts)
 
     async def _mcp_invoke(self, req: Request):

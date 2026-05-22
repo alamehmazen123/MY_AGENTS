@@ -118,6 +118,18 @@ class LifespanManager:
             gateway._deliberation = CELL_REGISTRY.get("deliberation")
             gateway._mcp = CELL_REGISTRY.get("mcp")
             print("[main] Cross-cell references wired")
+        
+        # PHASE 4 — Validate MCP registry
+        mcp_cell = CELL_REGISTRY.get("mcp")
+        if mcp_cell and mcp_cell._registry:
+            required_tools = ["file_explorer", "search_ripgrep", "python_exec"]
+            missing = [t for t in required_tools if not mcp_cell._registry.has(t)]
+            if missing:
+                print(f"[main] WARNING: MCP registry missing required tools: {missing}")
+            else:
+                print(f"[main] MCP registry validated: {len(mcp_cell._registry.list_tools())} tools registered")
+        else:
+            print("[main] WARNING: MCP cell or registry not available")
     
     async def _snapshot_loop(self):
         while not self._shutdown_event.is_set():
