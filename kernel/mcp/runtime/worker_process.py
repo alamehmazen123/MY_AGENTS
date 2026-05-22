@@ -11,12 +11,20 @@ from typing import Any
 
 def _worker_main(task_json: dict, result_path: str, limits_dict: dict):
     """Entry point for the worker process. Writes result JSON to result_path."""
-    # Point the workspace jail at the user-selected folder BEFORE any kernel
-    # module (and therefore kernel.config.settings) is imported, so presets that
-    # build their guard from settings.workspace_root at import time pick it up.
+    # Point the workspace jail at the user-selected folder. kernel.config may
+    # already be imported (spawn re-imports the parent __main__, which imports
+    # it), so setting the env var alone is not enough — we also overwrite the
+    # cached settings.workspace_root. This must happen BEFORE the preset module
+    # is imported, because presets build their guard from it at import time.
     workspace = task_json.get("workspace")
     if workspace:
         os.environ["MY_AGENTS_WORKSPACE_ROOT"] = workspace
+        try:
+            from pathlib import Path as _P
+            import kernel.config as _cfg
+            _cfg.settings.workspace_root = _P(workspace).expanduser().resolve()
+        except Exception:
+            pass
 
     import importlib
     from kernel.security.resource_limits import ResourceLimits

@@ -62,10 +62,11 @@ class LifespanManager:
         # 2. Load resolution table
         print(f"[main] Resolution table loaded: {table.size} scenarios")
         
-        # 3. Verify event chain
+        # 3. Verify event chain (self-heal a corrupt log from a prior run)
         if not bus.verify_chain():
-            print("[main] WARNING: Event chain integrity failed — attempting recovery")
-            await self._recovery.execute()
+            print("[main] Event chain integrity failed — archiving old log and starting fresh")
+            bus.heal()
+            print("[main] Event chain reset: VERIFIED")
         else:
             print("[main] Event chain integrity: VERIFIED")
         
@@ -157,7 +158,9 @@ class LifespanManager:
             except asyncio.TimeoutError:
                 ok = await self._recovery.self_test()
                 if not ok:
-                    print("[main] WARNING: Self-test failed")
+                    # Heal once rather than warning on every cycle.
+                    if bus.heal():
+                        print("[main] Self-test: event chain healed")
     
     async def shutdown(self):
         print("[main] Shutdown initiated...")

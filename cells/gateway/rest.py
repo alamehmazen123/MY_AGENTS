@@ -227,6 +227,24 @@ class RESTServer:
         except Exception as e:
             return {"models": [], "error": str(e)}
 
+    def _resolve_workspace(self, folder: str) -> str:
+        """Normalize a user-supplied workspace folder to an absolute directory.
+        Accepts absolute paths, paths relative to home, and bare well-known
+        names like 'Desktop'/'Documents'/'Downloads'. Returns '' if unresolvable."""
+        if not folder:
+            return ""
+        try:
+            p = Path(folder).expanduser()
+            if p.is_dir():
+                return str(p.resolve())
+            # Bare/relative name → try under the user's home directory.
+            candidate = (Path.home() / folder).expanduser()
+            if candidate.is_dir():
+                return str(candidate.resolve())
+        except Exception:
+            pass
+        return ""
+
     async def _pick_folder(self):
         """Open a native OS folder-picker dialog (this runs on the user's own
         machine since the app is localhost) and return the chosen absolute path."""
@@ -368,7 +386,7 @@ class RESTServer:
         prompt_text = body.get("prompt", "")
         model = body.get("model", settings.ollama_default_model)
         system = body.get("system", DEFAULT_SYSTEM_PROMPT)
-        workspace_folder = body.get("workspace_folder", "")
+        workspace_folder = self._resolve_workspace(body.get("workspace_folder", ""))
         no_tools = body.get("no_tools", False)
         temperature = body.get("temperature")
         context_length = body.get("context_length")
@@ -416,21 +434,39 @@ class RESTServer:
                 items = listing.get("items") if isinstance(listing, dict) else None
                 if items:
                     names = ", ".join(
-                        f"{i.get('name')}{'/' if i.get('type') == 'dir' else ''}" for i in items[:200]
+                        f"{i.get('name')}{'/' if i.get('type') == 'dir' else ''}" for i in items[:300]
+                    )
+                    # Pre-compute facts deterministically so a weak model doesn't
+                    # have to count/filter (the part small LLMs get wrong).
+                    files = [i for i in items if i.get("type") != "dir"]
+                    dirs = [i for i in items if i.get("type") == "dir"]
+                    ext_counts: dict[str, int] = {}
+                    for i in files:
+                        name = i.get("name", "")
+                        ext = name[name.rfind("."):].lower() if "." in name else "(no ext)"
+                        ext_counts[ext] = ext_counts.get(ext, 0) + 1
+                    counts_str = ", ".join(
+                        f"{ext}={n}" for ext, n in sorted(ext_counts.items(), key=lambda kv: -kv[1])
                     )
                     current_prompt = (
                         f"[WORKSPACE: {workspace_folder}]\n"
-                        f"[COMPLETE LIST OF FILES IN WORKSPACE ROOT: {names}]\n"
-                        "The list above is complete and authoritative. For questions about "
-                        "WHICH or HOW MANY files exist, answer directly from this list and do "
-                        "NOT call a tool. Only use file_explorer to READ a file's contents or to "
-                        "WRITE/modify files, with paths relative to the workspace (e.g. a filename).\n\n"
+                        f"[FACTS — workspace root: {len(files)} files, {len(dirs)} folders]\n"
+                        f"[FILE COUNTS BY EXTENSION: {counts_str}]\n"
+                        f"[COMPLETE FILE/FOLDER LIST: {names}]\n"
+                        "The FACTS and COUNTS above are computed directly from the file system "
+                        "and are exact. For questions about WHICH or HOW MANY files exist (by "
+                        "extension or otherwise), answer using these numbers verbatim and do NOT "
+                        "call a tool or recount yourself. Only use file_explorer to READ a file's "
+                        "contents or to WRITE/modify files, with paths relative to the workspace.\n\n"
                         f"{prompt_text}"
                     )
                     context_injected = True
             except Exception as e:
                 logger.info("[TOOL_TRACE] workspace_context_failed=%s", str(e))
 
+        # The base request used when rebuilding continuation prompts. Includes the
+        # injected workspace facts so they survive across tool iterations.
+        base_prompt = current_prompt
         final_response = ""
         any_tool_executed = False
 
@@ -540,7 +576,7 @@ class RESTServer:
                         tool_results.append({"call": tc, "result": result})
                         any_tool_executed = True
 
-                    current_prompt = self._build_continuation_prompt(prompt_text, response_text, tool_results)
+                    current_prompt = self._build_continuation_prompt(base_prompt, response_text, tool_results)
                     logger.info("stage=F context_after_tool prompt_len=%s", len(current_prompt))
                     # After first turn, simplify system prompt
                     full_system = system + "\nContinue based on the tool results. Do not use more tools unless necessary."
@@ -706,7 +742,7 @@ class RESTServer:
         body = await req.json()
         preset = body.get("preset", "")
         args = body.get("args", {})
-        workspace = body.get("workspace_folder", "") or None
+        workspace = self._resolve_workspace(body.get("workspace_folder", "")) or None
         if not preset:
             return {"error": "missing_preset"}
         mcp_cell = getattr(self._gateway, "_mcp", None)
@@ -790,7 +826,7 @@ class RESTServer:
         import json
         body = await req.json()
         plan_text = body.get("plan", "")
-        workspace_folder = body.get("workspace_folder", "")
+        workspace_folder = self._resolve_workspace(body.get("workspace_folder", ""))
         if not plan_text:
             return {"error": "empty_plan"}
         mcp_cell = getattr(self._gateway, "_mcp", None)

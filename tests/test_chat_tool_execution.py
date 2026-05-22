@@ -301,7 +301,7 @@ async def test_missing_model_fails_fast(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_workspace_folder_is_passed_to_mcp(monkeypatch):
+async def test_workspace_folder_is_passed_to_mcp(monkeypatch, tmp_path):
     """Regression: the user-selected folder must reach MCP so the jail follows it."""
     mcp = FakeMCPCell()
     server = make_server(mcp)
@@ -313,12 +313,20 @@ async def test_workspace_folder_is_passed_to_mcp(monkeypatch):
                 "prompt": "list current directory",
                 "model": "dummy",
                 "no_tools": False,
-                "workspace_folder": "/tmp/my_project",
+                "workspace_folder": str(tmp_path),
             }
 
     await server._handle_prompt(FakeReq())
     assert mcp.invocations, "expected at least the workspace listing invocation"
-    assert mcp.last_workspace == "/tmp/my_project"
+    assert mcp.last_workspace == str(tmp_path.resolve())
+
+
+def test_resolve_workspace(tmp_path):
+    """Absolute dirs resolve; bogus names return '' (no silent wrong-folder)."""
+    server = make_server(FakeMCPCell())
+    assert server._resolve_workspace(str(tmp_path)) == str(tmp_path.resolve())
+    assert server._resolve_workspace("") == ""
+    assert server._resolve_workspace("definitely-not-a-real-folder-xyz-123") == ""
 
 
 if __name__ == "__main__":
