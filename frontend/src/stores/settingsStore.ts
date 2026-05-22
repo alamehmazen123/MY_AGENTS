@@ -186,6 +186,11 @@ const MCP_PRESETS = [
   'python_exec', 'terminal_whitelist', 'diff_engine', 'refactor_safe',
   'doc_generator', 'dependency_inspector', 'workspace_indexer',
   'health_monitor', 'project_scaffold', 'rollback_manager',
+  'web_fetch', 'network_info', 'clock', 'calculator', 'text_stats',
+  'memory', 'sequential_thinking', 'sqlite_query', 'csv_json', 'http_request',
+  'wikipedia', 'weather', 'arxiv', 'ip_geolocation', 'dns_lookup',
+  'html_to_markdown', 'clipboard', 'convert_units', 'pdf_extract',
+  'office_reader', 'screenshot', 'process_monitor', 'qr_code', 'sympy_math',
 ]
 
 const defaultMcpEnabled: Record<string, boolean> = {}

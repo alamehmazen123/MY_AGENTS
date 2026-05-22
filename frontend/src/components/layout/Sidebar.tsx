@@ -20,7 +20,29 @@ const MCP_PRESETS = [
   { id: 'rollback_manager', name: 'Rollback Manager', desc: 'Undo changes safely' },
   { id: 'web_fetch', name: 'Web Fetch', desc: 'Fetch a URL (news, docs, pages)' },
   { id: 'network_info', name: 'Network Info', desc: 'Local & public IP address' },
-]
+  { id: 'clock', name: 'Clock', desc: 'Date/time & timezones' },
+  { id: 'calculator', name: 'Calculator', desc: 'Safe math evaluation' },
+  { id: 'text_stats', name: 'Text Stats', desc: 'Word/line/char counts' },
+  { id: 'memory', name: 'Memory', desc: 'Persistent key-value recall' },
+  { id: 'sequential_thinking', name: 'Sequential Thinking', desc: 'Step-by-step reasoning log' },
+  { id: 'sqlite_query', name: 'SQLite Query', desc: 'Read-only SQL on .db files' },
+  { id: 'csv_json', name: 'CSV/JSON Reader', desc: 'Preview CSV & JSON files' },
+  { id: 'http_request', name: 'HTTP Request', desc: 'Call any REST API' },
+  { id: 'wikipedia', name: 'Wikipedia', desc: 'Search & summarize articles' },
+  { id: 'weather', name: 'Weather', desc: 'Forecast by city (no key)' },
+  { id: 'arxiv', name: 'arXiv', desc: 'Search research papers' },
+  { id: 'ip_geolocation', name: 'IP Geolocation', desc: 'Locate an IP / your own' },
+  { id: 'dns_lookup', name: 'DNS Lookup', desc: 'Resolve hostnames to IPs' },
+  { id: 'html_to_markdown', name: 'HTML to Text', desc: 'Clean text from web/HTML' },
+  { id: 'clipboard', name: 'Clipboard', desc: 'Read/write the clipboard' },
+  { id: 'convert_units', name: 'Unit/Currency Convert', desc: 'Length, mass, temp, currency' },
+  { id: 'pdf_extract', name: 'PDF Extract', desc: 'Extract text from PDFs' },
+  { id: 'office_reader', name: 'Office Reader', desc: 'Read Word & Excel files' },
+  { id: 'screenshot', name: 'Screenshot', desc: 'Capture the screen to PNG' },
+  { id: 'process_monitor', name: 'Process Monitor', desc: 'CPU/RAM/disk & processes' },
+  { id: 'qr_code', name: 'QR Code', desc: 'Generate QR (ASCII)' },
+  { id: 'sympy_math', name: 'Symbolic Math', desc: 'Solve/simplify/calculus' },
+].sort((a, b) => a.name.localeCompare(b.name))
 
 const PRESET_NAMES: PresetName[] = ['CHAT', 'REVIEWING', 'CODING', 'SUPER_CODING', 'EXECUTION', 'CUSTOM']
 
@@ -51,6 +73,8 @@ export function Sidebar() {
   const [activeTab, setActiveTab] = useState<'sessions' | 'mcp' | 'settings'>('sessions')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
+  const [coreInstructions, setCoreInstructions] = useState('')
+  const [showCore, setShowCore] = useState(false)
   const [showGenerateMcp, setShowGenerateMcp] = useState(false)
   const [mcpDescription, setMcpDescription] = useState('')
   const [refreshing, setRefreshing] = useState(false)
@@ -58,9 +82,14 @@ export function Sidebar() {
   useEffect(() => {
     fetchModels()
     applyTheme()
+    fetch('/api/core-instructions')
+      .then((r) => r.json())
+      .then((d) => setCoreInstructions(d.instructions || ''))
+      .catch(() => {})
   }, [fetchModels, applyTheme])
 
-  const enabledCount = Object.values(mcpEnabled).filter(Boolean).length
+  // Tools default to ON unless explicitly disabled (undefined => active).
+  const enabledCount = MCP_PRESETS.filter((t) => mcpEnabled[t.id] !== false).length
 
   const handleModelAChange = (model: string) => {
     setAgentAModel(model)
@@ -248,14 +277,14 @@ export function Sidebar() {
                     <div className="text-[10px] text-gray-500 truncate">{tool.desc}</div>
                   </div>
                   <button
-                    onClick={() => setMcpEnabled(tool.id, !mcpEnabled[tool.id])}
+                    onClick={() => setMcpEnabled(tool.id, mcpEnabled[tool.id] === false)}
                     className={`ml-2 px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                      mcpEnabled[tool.id]
+                      mcpEnabled[tool.id] !== false
                         ? 'bg-green-700 text-green-100 hover:bg-green-600'
                         : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
                     }`}
                   >
-                    {mcpEnabled[tool.id] ? 'ON' : 'OFF'}
+                    {mcpEnabled[tool.id] !== false ? 'ON' : 'OFF'}
                   </button>
                 </div>
               ))}
@@ -266,6 +295,27 @@ export function Sidebar() {
         {/* ── SETTINGS TAB ── */}
         {activeTab === 'settings' && (
           <div className="space-y-4 p-2">
+            {/* Core Instructions — applied to every agent & preset */}
+            {coreInstructions && (
+              <div className="rounded border border-purple-800 bg-purple-900/20">
+                <button
+                  onClick={() => setShowCore((v) => !v)}
+                  className="w-full flex items-center justify-between px-2 py-1.5 text-left"
+                  title="These instructions are prepended to every agent on every prompt"
+                >
+                  <span className="text-xs font-medium text-purple-300">
+                    📜 Core Instructions <span className="text-green-400">• always active</span>
+                  </span>
+                  <span className="text-purple-400 text-xs">{showCore ? '▲' : '▼'}</span>
+                </button>
+                {showCore && (
+                  <pre className="max-h-60 overflow-auto px-2 pb-2 text-[10px] leading-snug text-gray-300 whitespace-pre-wrap">
+                    {coreInstructions}
+                  </pre>
+                )}
+              </div>
+            )}
+
             {/* Preset */}
             <div>
               <label className="text-xs text-gray-400 block mb-1">Preset Mode</label>

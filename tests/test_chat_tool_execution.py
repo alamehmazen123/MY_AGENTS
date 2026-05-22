@@ -321,6 +321,28 @@ async def test_workspace_folder_is_passed_to_mcp(monkeypatch, tmp_path):
     assert mcp.last_workspace == str(tmp_path.resolve())
 
 
+@pytest.mark.asyncio
+async def test_core_instructions_reach_the_model(monkeypatch):
+    """PROOF: the project-wide core instructions are included in the system prompt
+    of the ACTUAL payload sent to the model on every prompt."""
+    posts: list = []
+    server = make_server(FakeMCPCell())
+    monkeypatch.setattr("httpx.AsyncClient", make_recording_httpx("ok", posts))
+
+    class FakeReq:
+        async def json(self):
+            return {"prompt": "anything", "model": "dummy", "no_tools": True}
+
+    await server._handle_prompt(FakeReq())
+
+    assert posts, "no generate call captured"
+    system = posts[0].get("system", "")
+    # Distinctive phrases that exist ONLY in core_instructions.md (Karpathy guidelines).
+    assert "Simplicity First" in system, f"core instructions missing from system prompt: {system[:200]}"
+    assert "Surgical Changes" in system
+    assert "Think Before Coding" in system
+
+
 def test_resolve_workspace(tmp_path):
     """Absolute dirs resolve; bogus names return '' (no silent wrong-folder)."""
     server = make_server(FakeMCPCell())

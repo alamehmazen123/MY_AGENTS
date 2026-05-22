@@ -20,6 +20,25 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 
+CORE_INSTRUCTIONS_FILE = Path(__file__).resolve().parent.parent.parent / "core_instructions.md"
+_CORE_CACHE: dict = {"mtime": None, "text": ""}
+
+
+def _load_core_instructions() -> str:
+    """Load the project-wide core instructions (core_instructions.md), cached and
+    auto-reloaded when the file changes. Applied to every agent and preset."""
+    try:
+        if not CORE_INSTRUCTIONS_FILE.exists():
+            return ""
+        mtime = CORE_INSTRUCTIONS_FILE.stat().st_mtime
+        if _CORE_CACHE["mtime"] != mtime:
+            _CORE_CACHE["text"] = CORE_INSTRUCTIONS_FILE.read_text(encoding="utf-8", errors="replace").strip()
+            _CORE_CACHE["mtime"] = mtime
+        return _CORE_CACHE["text"]
+    except Exception:
+        return ""
+
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful AI coding assistant. Answer precisely and accurately. "
     "Only respond with relevant information. If you don't know something, say so. "
@@ -153,6 +172,10 @@ class RESTServer:
         @self.app.post("/api/pick-folder")
         async def pick_folder():
             return await self._pick_folder()
+
+        @self.app.get("/api/core-instructions")
+        async def core_instructions():
+            return {"instructions": _load_core_instructions(), "applied": True}
 
         @self.app.get("/api/ollama-ps")
         async def ollama_ps():
@@ -547,8 +570,13 @@ class RESTServer:
                         "prompt": current_prompt,
                         "stream": False,
                     }
-                    if full_system:
-                        payload["system"] = full_system
+                    # Prepend the project-wide core instructions (Karpathy
+                    # guidelines) to EVERY agent/preset, on every generation.
+                    core = _load_core_instructions()
+                    combined_system = (core + "\n\n" + full_system).strip() if core else full_system
+                    if combined_system:
+                        payload["system"] = combined_system
+                    logger.info("[TOOL_TRACE] core_applied=%s combined_system_len=%s", bool(core), len(combined_system or ""))
 
                     options = {}
                     if temperature is not None:
