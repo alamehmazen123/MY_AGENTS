@@ -11,6 +11,13 @@ from typing import Any
 
 def _worker_main(task_json: dict, result_path: str, limits_dict: dict):
     """Entry point for the worker process. Writes result JSON to result_path."""
+    # Point the workspace jail at the user-selected folder BEFORE any kernel
+    # module (and therefore kernel.config.settings) is imported, so presets that
+    # build their guard from settings.workspace_root at import time pick it up.
+    workspace = task_json.get("workspace")
+    if workspace:
+        os.environ["MY_AGENTS_WORKSPACE_ROOT"] = workspace
+
     import importlib
     from kernel.security.resource_limits import ResourceLimits
 

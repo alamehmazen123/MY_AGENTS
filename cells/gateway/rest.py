@@ -52,11 +52,16 @@ TOOL_INSTRUCTIONS = (
     "- python_exec: Execute Python code safely.\n"
     '  [[MCP:python_exec:{"code":"print(1+1)"}]]\n\n'
     "RULES:\n"
-    "1. If the user asks about files or directories, you MUST output a tool call line.\n"
+    "1. To read a file's contents or to create/modify files, you MUST output a tool call line. "
+    "If a COMPLETE LIST OF FILES is already provided in the context, answer listing/counting "
+    "questions directly from it without a tool call.\n"
     "2. Do NOT wrap the line in markdown code blocks.\n"
     "3. Do NOT add explanations before or after the tool call.\n"
     "4. After receiving the tool result, answer using the actual data.\n"
-    "5. You may chain up to 3 tools in sequence."
+    "5. You may chain up to 3 tools in sequence.\n"
+    "6. ALL paths are RELATIVE to the user's workspace folder. Use \".\" for the "
+    "workspace root (e.g. to list everything). NEVER use absolute drive paths like "
+    "\"C:\\\\\" or \"/\" — they are outside the workspace and will be rejected."
 )
 
 
@@ -361,6 +366,34 @@ class RESTServer:
                     preset_name, model, no_tools, tools_enabled, mcp_cell is not None, prompt_text[:200])
 
         current_prompt = prompt_text
+        context_injected = False
+
+        # Claude-Code-style environment awareness: when tools are on and a workspace
+        # folder is set, give the agent a real listing of that folder up front so it
+        # knows what exists instead of guessing paths or claiming it has no access.
+        if tools_enabled and workspace_folder:
+            try:
+                listing = await mcp_cell.invoke(
+                    "file_explorer", {"action": "list", "path": "."}, workspace=workspace_folder
+                )
+                items = listing.get("items") if isinstance(listing, dict) else None
+                if items:
+                    names = ", ".join(
+                        f"{i.get('name')}{'/' if i.get('type') == 'dir' else ''}" for i in items[:200]
+                    )
+                    current_prompt = (
+                        f"[WORKSPACE: {workspace_folder}]\n"
+                        f"[COMPLETE LIST OF FILES IN WORKSPACE ROOT: {names}]\n"
+                        "The list above is complete and authoritative. For questions about "
+                        "WHICH or HOW MANY files exist, answer directly from this list and do "
+                        "NOT call a tool. Only use file_explorer to READ a file's contents or to "
+                        "WRITE/modify files, with paths relative to the workspace (e.g. a filename).\n\n"
+                        f"{prompt_text}"
+                    )
+                    context_injected = True
+            except Exception as e:
+                logger.info("[TOOL_TRACE] workspace_context_failed=%s", str(e))
+
         final_response = ""
         any_tool_executed = False
 
@@ -373,7 +406,7 @@ class RESTServer:
                 if len(current_prompt) > MAX_PROMPT_LEN:
                     current_prompt = current_prompt[:MAX_PROMPT_LEN] + "\n\n[...truncated by backend]"
 
-                async with httpx.AsyncClient(timeout=180) as client:
+                async with httpx.AsyncClient(timeout=240) as client:
                     payload = {
                         "model": model,
                         "prompt": current_prompt,
@@ -393,6 +426,13 @@ class RESTServer:
                     options["num_predict"] = body.get("max_tokens", 2048)
                     payload["options"] = options
 
+                    # Disable extended "thinking" for reasoning models (qwen3,
+                    # deepseek-r1, gpt-oss). Their hidden chain-of-thought burns
+                    # thousands of tokens and is the main cause of timeouts here.
+                    low = model.lower()
+                    if any(tag in low for tag in ("qwen3", "-r1", "r1:", "gpt-oss", "thinking")):
+                        payload["think"] = False
+
                     # Keep the model resident across tool iterations to avoid
                     # reloading it from disk every round (the main source of latency).
                     # The single explicit unload happens in the finally block below,
@@ -404,7 +444,7 @@ class RESTServer:
                     res = await client.post(
                         f"{settings.ollama_host}/api/generate",
                         json=payload,
-                        timeout=180,
+                        timeout=240,
                     )
                     if res.status_code != 200:
                         logger.info("stage=G ollama_error status=%s", res.status_code)
@@ -434,7 +474,7 @@ class RESTServer:
                     # PHASE 7 — Force tool execution for explicit tool requests.
                     # Only on the first turn: once tools have run, the model must
                     # answer from the results instead of looping on the same request.
-                    if not tool_calls and iteration == 0 and not any_tool_executed:
+                    if not tool_calls and iteration == 0 and not any_tool_executed and not context_injected:
                         forced = self._force_tool_detection(prompt_text)
                         if forced:
                             logger.info("[TOOL_TRACE] stage=C_forced forced_tool_preset=%s forced_args=%s", forced["preset"], json.dumps(forced["args"]))
@@ -458,7 +498,7 @@ class RESTServer:
                                             args[key] = str(wf / val)
 
                         logger.info("[TOOL_TRACE] stage=D dispatching_mcp preset=%s args=%s", tc["preset"], json.dumps(args))
-                        result = await mcp_cell.invoke(tc["preset"], args)
+                        result = await mcp_cell.invoke(tc["preset"], args, workspace=workspace_folder or None)
                         logger.info("[TOOL_TRACE] stage=E tool_result preset=%s result=%s", tc["preset"], json.dumps(result)[:500])
                         tool_results.append({"call": tc, "result": result})
                         any_tool_executed = True
@@ -480,7 +520,7 @@ class RESTServer:
             return {
                 "error": "ollama_timeout",
                 "output": (
-                    f"[Error: '{model}' did not respond within 180s. "
+                    f"[Error: '{model}' did not respond within 240s. "
                     "It may be cold-loading a large model or generating too much. "
                     "Try a smaller model or a simpler prompt.]"
                 ),
@@ -629,13 +669,14 @@ class RESTServer:
         body = await req.json()
         preset = body.get("preset", "")
         args = body.get("args", {})
+        workspace = body.get("workspace_folder", "") or None
         if not preset:
             return {"error": "missing_preset"}
         mcp_cell = getattr(self._gateway, "_mcp", None)
         if not mcp_cell:
             return {"error": "mcp_not_available"}
         try:
-            result = await mcp_cell.invoke(preset, args)
+            result = await mcp_cell.invoke(preset, args, workspace=workspace)
             return result
         except Exception as e:
             return {"error": str(e)}
@@ -730,7 +771,7 @@ class RESTServer:
                     if key in args and isinstance(args[key], str):
                         if not Path(args[key]).is_absolute():
                             args[key] = str(wf / args[key])
-            result = await mcp_cell.invoke(tc["preset"], args)
+            result = await mcp_cell.invoke(tc["preset"], args, workspace=workspace_folder or None)
             results.append({"tool": tc["preset"], "args": tc["args"], "result": result})
         return {"status": "executed", "results": results}
 

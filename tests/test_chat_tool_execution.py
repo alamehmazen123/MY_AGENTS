@@ -28,8 +28,9 @@ class FakeMCPCell:
         self._responses = responses or {}
         self.invocations: list[tuple[str, dict]] = []
 
-    async def invoke(self, preset: str, args: dict) -> dict:
+    async def invoke(self, preset: str, args: dict, workspace: str | None = None) -> dict:
         self.invocations.append((preset, args))
+        self.last_workspace = workspace
         if preset in self._responses:
             return self._responses[preset]
         # Default realistic responses
@@ -297,6 +298,27 @@ async def test_missing_model_fails_fast(monkeypatch):
 
     result = await server._handle_prompt(FakeReq())
     assert result.get("error") == "model_not_installed"
+
+
+@pytest.mark.asyncio
+async def test_workspace_folder_is_passed_to_mcp(monkeypatch):
+    """Regression: the user-selected folder must reach MCP so the jail follows it."""
+    mcp = FakeMCPCell()
+    server = make_server(mcp)
+    monkeypatch.setattr("httpx.AsyncClient", make_fake_httpx("prose, no tool call"))
+
+    class FakeReq:
+        async def json(self):
+            return {
+                "prompt": "list current directory",
+                "model": "dummy",
+                "no_tools": False,
+                "workspace_folder": "/tmp/my_project",
+            }
+
+    await server._handle_prompt(FakeReq())
+    assert mcp.invocations, "expected at least the workspace listing invocation"
+    assert mcp.last_workspace == "/tmp/my_project"
 
 
 if __name__ == "__main__":

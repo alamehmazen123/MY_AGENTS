@@ -16,7 +16,7 @@ class ProcessExecutor:
     def __init__(self):
         self._metrics = {"invocations": 0, "timeouts": 0, "crashes": 0}
 
-    async def run(self, tool: ToolDefinition, args: dict) -> dict:
+    async def run(self, tool: ToolDefinition, args: dict, workspace: str | None = None) -> dict:
         import importlib.util
         limits = tool.policy.limits if tool.policy else ResourceLimits()
         timeout = tool.timeout
@@ -29,7 +29,7 @@ class ProcessExecutor:
         start = __import__("time").time()
 
         if is_preset:
-            task_json = {"preset": tool.name, "args": args}
+            task_json = {"preset": tool.name, "args": args, "workspace": workspace}
             limits_dict = {
                 "memory_mb": limits.memory_mb,
                 "cpu_seconds": limits.cpu_seconds,

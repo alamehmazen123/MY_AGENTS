@@ -69,7 +69,7 @@ async function callOllama(
   }
 ): Promise<string> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 185_000)
+  const timeoutId = setTimeout(() => controller.abort(), 280_000)
 
   if (opts?.signal) {
     const onAbort = () => {
@@ -367,10 +367,13 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
       try {
         // ── Phase 1: Agent-A reasons ──
+        // Agent-A is the "doer" — it always has tool access (the whole point of a
+        // Claude-Code-style agent). The MCP toggle only affects whether the user
+        // can turn this off explicitly; by default A can read/write the workspace.
         const responseA = await callOllama(fullPrompt, settings.agentAModel, settings.systemPromptA, {
           workspaceFolder: folder,
           attachedFiles: files,
-          enableTools: settings.mcpToolsEnabled,
+          enableTools: settings.preset !== 'CHAT',
           temperature: settings.temperatureA,
           contextLength: settings.contextLength,
           signal: abortCtrl.signal,

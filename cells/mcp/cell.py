@@ -32,6 +32,7 @@ class MCPCell(BaseCell):
         self._supervisor = None
         self._telemetry = None
         self._guard = None
+        self._guard_cache: dict[str, WorkspaceGuard] = {}
 
     async def _on_init(self):
         self._guard = WorkspaceGuard(settings.workspace_root)
@@ -80,7 +81,24 @@ class MCPCell(BaseCell):
             except Exception as e:
                 print(f"[mcp] Failed to load preset {name}: {e}")
 
-    async def invoke(self, preset: str, args: dict) -> dict:
+    def _guard_for(self, workspace: str | None) -> WorkspaceGuard:
+        """Return a guard rooted at *workspace* (the user-selected folder) if it
+        exists, else the default project-root guard. Guards are cached by path."""
+        if not workspace:
+            return self._guard
+        from pathlib import Path
+        try:
+            root = Path(workspace).expanduser().resolve()
+            if not root.is_dir():
+                return self._guard
+        except Exception:
+            return self._guard
+        key = str(root)
+        if key not in self._guard_cache:
+            self._guard_cache[key] = WorkspaceGuard(root)
+        return self._guard_cache[key]
+
+    async def invoke(self, preset: str, args: dict, workspace: str | None = None) -> dict:
         if not self._registry.has(preset):
             return {"error": "preset_not_found"}
 
@@ -91,11 +109,13 @@ class MCPCell(BaseCell):
         start = time.time()
         self._supervisor.heartbeat(preset)
 
-        # Enforce workspace jail on filesystem tools
+        # Enforce workspace jail on filesystem tools, rooted at the user's
+        # selected folder when provided (so agents work where the user is).
+        guard = self._guard_for(workspace)
         if ToolCapability.FILESYSTEM in tool.capabilities:
-            args = self._jail_args(args)
+            args = self._jail_args(args, guard)
 
-        result = await self._pool.execute(tool, args)
+        result = await self._pool.execute(tool, args, workspace=str(guard.root))
 
         duration = time.time() - start
         status = result.get("status", "error")
@@ -104,13 +124,14 @@ class MCPCell(BaseCell):
 
         return result
 
-    def _jail_args(self, args: dict) -> dict:
-        """Rewrite path arguments to stay inside workspace jail."""
+    def _jail_args(self, args: dict, guard: WorkspaceGuard | None = None) -> dict:
+        """Rewrite path arguments to stay inside the workspace jail."""
+        guard = guard or self._guard
         jailed = dict(args)
         for key in ("path", "dest", "path_a", "path_b", "cwd"):
             if key in jailed and isinstance(jailed[key], str):
                 try:
-                    jailed[key] = str(self._guard.validate(jailed[key]))
+                    jailed[key] = str(guard.validate(jailed[key]))
                 except Exception:
                     pass  # Let the preset report the violation
         return jailed
