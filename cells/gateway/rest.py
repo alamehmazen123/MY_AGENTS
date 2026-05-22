@@ -330,6 +330,7 @@ class RESTServer:
         no_tools = body.get("no_tools", False)
         temperature = body.get("temperature")
         context_length = body.get("context_length")
+        preset_name = body.get("preset", "UNKNOWN")
 
         if not prompt_text:
             return {"error": "empty_prompt", "output": "[Error: empty prompt received]"}
@@ -340,7 +341,8 @@ class RESTServer:
         if tools_enabled:
             full_system = system + "\n\n" + TOOL_INSTRUCTIONS
 
-        logger.info("stage=A received_prompt=%s model=%s tools_enabled=%s", prompt_text[:200], model, tools_enabled)
+        logger.info("[TOOL_TRACE] stage=A preset=%s model=%s no_tools=%s tools_enabled=%s mcp_available=%s prompt_preview=%s",
+                    preset_name, model, no_tools, tools_enabled, mcp_cell is not None, prompt_text[:200])
 
         current_prompt = prompt_text
         final_response = ""
@@ -405,16 +407,17 @@ class RESTServer:
                         break
 
                     tool_calls = self._extract_tool_calls(response_text)
-                    logger.info("stage=C tools_detected=%s count=%s", bool(tool_calls), len(tool_calls))
+                    logger.info("[TOOL_TRACE] stage=C extracted_tool_count=%s", len(tool_calls))
 
                     # PHASE 7 — Force tool execution for explicit tool requests
                     if not tool_calls:
                         forced = self._force_tool_detection(prompt_text)
                         if forced:
-                            logger.info("stage=C_forced forced_tool=%s", forced["preset"])
+                            logger.info("[TOOL_TRACE] stage=C_forced forced_tool_preset=%s forced_args=%s", forced["preset"], json.dumps(forced["args"]))
                             tool_calls = [forced]
 
                     if not tool_calls:
+                        logger.info("[TOOL_TRACE] stage=C_no_tools breaking_loop")
                         break
 
                     tool_results = []
@@ -430,9 +433,9 @@ class RESTServer:
                                         if not Path(val).is_absolute():
                                             args[key] = str(wf / val)
 
-                        logger.info("stage=D dispatching_mcp=%s args=%s", tc["preset"], json.dumps(args))
+                        logger.info("[TOOL_TRACE] stage=D dispatching_mcp preset=%s args=%s", tc["preset"], json.dumps(args))
                         result = await mcp_cell.invoke(tc["preset"], args)
-                        logger.info("stage=E tool_result=%s", json.dumps(result)[:500])
+                        logger.info("[TOOL_TRACE] stage=E tool_result preset=%s result=%s", tc["preset"], json.dumps(result)[:500])
                         tool_results.append({"call": tc, "result": result})
                         any_tool_executed = True
 
@@ -454,9 +457,9 @@ class RESTServer:
 
         # PHASE 11 — Hallucination prevention
         if any_tool_executed:
-            logger.info("stage=H final_response_tools_used=%s", any_tool_executed)
+            logger.info("[TOOL_TRACE] stage=H final_response_tools_used=%s", any_tool_executed)
         else:
-            logger.info("stage=H final_response_no_tools")
+            logger.info("[TOOL_TRACE] stage=H final_response_no_tools")
 
         return {
             "output": final_response,
@@ -493,26 +496,34 @@ class RESTServer:
         """PHASE 7 — Force tool execution when user explicitly requests file operations."""
         import re
         lowered = prompt_text.lower()
+        logger.info("[TOOL_TRACE] FORCE_CHECK prompt=%s", prompt_text[:200])
         # Detect explicit file_explorer requests
         if any(k in lowered for k in ("list files", "list directory", "show files", "show directory", "list current directory", "what files", "which files")):
             path = "."
             # Try to extract a path
-            m = re.search(r'(?:in|under|from|at)\s+([\w\-/.\\]+)', lowered)
+            m = re.search(r'(?:in|under|from|at)\s+([\w\-/.\\:]+)', lowered)
             if m:
                 candidate = m.group(1)
                 if candidate.lower() not in ("the", "a", "this", "that", "my", "your"):
                     path = candidate
-            return {"preset": "file_explorer", "args": {"action": "list", "path": path}, "raw": "[[forced]]"}
+            result = {"preset": "file_explorer", "args": {"action": "list", "path": path}, "raw": "[[forced]]"}
+            logger.info("[TOOL_TRACE] FORCE_MATCH=%s", result)
+            return result
         if any(k in lowered for k in ("read file", "show file", "file content", "contents of", "what is in")) or lowered.startswith("read "):
             m = re.search(r'(?:file\s+)([\w\-/.\\]+\.\w+)', lowered)
             if not m and lowered.startswith("read "):
                 # Try to grab the word after "read"
                 m = re.search(r'^read\s+([\w\-/.\\]+\.\w+)', lowered)
             if m:
-                return {"preset": "file_explorer", "args": {"action": "read", "path": m.group(1)}, "raw": "[[forced]]"}
+                result = {"preset": "file_explorer", "args": {"action": "read", "path": m.group(1)}, "raw": "[[forced]]"}
+                logger.info("[TOOL_TRACE] FORCE_MATCH=%s", result)
+                return result
         if any(k in lowered for k in ("search for", "find function", "find code", "search code", "grep for")):
             query = re.sub(r'.*?(search for|find function|find code|search code|grep for)\s+', '', lowered).strip().split()[0]
-            return {"preset": "search_ripgrep", "args": {"query": query or "def", "path": "."}, "raw": "[[forced]]"}
+            result = {"preset": "search_ripgrep", "args": {"query": query or "def", "path": "."}, "raw": "[[forced]]"}
+            logger.info("[TOOL_TRACE] FORCE_MATCH=%s", result)
+            return result
+        logger.info("[TOOL_TRACE] FORCE_MATCH=None")
         return None
 
     def _build_continuation_prompt(self, original_prompt: str, last_response: str, tool_results: list):

@@ -12,6 +12,9 @@ Key Features
 🎨 ChatGPT-Grade UX — Streaming, code blocks, themes, 60fps
 Stack: FastAPI + React/Vite + SQLite + Ollama
 
+# how to get the tree of the project:
+Get-ChildItem -Recurse | Out-String -Stream | % { $_ } | Out-File project_tree.txt
+
 how to run:
 # Install dependencies
 pip install -r requirements.txt

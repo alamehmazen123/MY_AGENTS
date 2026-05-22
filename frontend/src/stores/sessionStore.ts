@@ -87,6 +87,13 @@ async function callOllama(
     if (opts?.temperature !== undefined) body.temperature = opts.temperature
     if (opts?.contextLength) body.context_length = opts.contextLength
 
+    const settings = useSettingsStore.getState()
+    body.preset = settings.preset
+    console.log(
+      '[SESSION_STORE_TRACE] sending /api/prompt body=',
+      JSON.stringify({ preset: body.preset, model: body.model, no_tools: body.no_tools, enableTools: opts?.enableTools, system_len: body.system?.length, prompt_preview: body.prompt?.slice(0, 80) })
+    )
+
     const res = await fetch('/api/prompt', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
