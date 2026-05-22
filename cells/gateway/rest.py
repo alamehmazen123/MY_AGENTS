@@ -497,10 +497,25 @@ class RESTServer:
         import re
         lowered = prompt_text.lower()
         logger.info("[TOOL_TRACE] FORCE_CHECK prompt=%s", prompt_text[:200])
-        # Detect explicit file_explorer requests
-        if any(k in lowered for k in ("list files", "list directory", "show files", "show directory", "list current directory", "what files", "which files")):
+
+        # Helper: check if any keyword from a group appears in the text
+        def _has_any(keywords):
+            return any(k in lowered for k in keywords)
+
+        # Helper: check if words appear near each other (within same sentence)
+        def _has_words_near(words):
+            for sentence in re.split(r'[.!?\n]', lowered):
+                if all(w in sentence for w in words):
+                    return True
+            return False
+
+        # Detect explicit file_explorer LIST requests
+        list_keywords = ("list files", "list directory", "show files", "show directory",
+                         "list current directory", "what files", "which files",
+                         "list all files", "list the files", "list python files",
+                         "show all files", "show me the files", "give me the files")
+        if _has_any(list_keywords) or _has_words_near(("list", "files")) or _has_words_near(("list", "directory")) or _has_words_near(("show", "files")) or _has_words_near(("show", "directory")):
             path = "."
-            # Try to extract a path
             m = re.search(r'(?:in|under|from|at)\s+([\w\-/.\\:]+)', lowered)
             if m:
                 candidate = m.group(1)
@@ -509,20 +524,32 @@ class RESTServer:
             result = {"preset": "file_explorer", "args": {"action": "list", "path": path}, "raw": "[[forced]]"}
             logger.info("[TOOL_TRACE] FORCE_MATCH=%s", result)
             return result
-        if any(k in lowered for k in ("read file", "show file", "file content", "contents of", "what is in")) or lowered.startswith("read "):
+
+        # Detect explicit file_explorer READ requests
+        read_keywords = ("read file", "show file", "file content", "contents of", "what is in", "open file")
+        if _has_any(read_keywords) or lowered.startswith("read ") or _has_words_near(("read", "file")) or _has_words_near(("show", "content")):
             m = re.search(r'(?:file\s+)([\w\-/.\\]+\.\w+)', lowered)
-            if not m and lowered.startswith("read "):
-                # Try to grab the word after "read"
+            if not m:
                 m = re.search(r'^read\s+([\w\-/.\\]+\.\w+)', lowered)
+            if not m:
+                m = re.search(r'(?:content of|contents of|in file|inside file)\s+([\w\-/.\\]+\.\w+)', lowered)
             if m:
                 result = {"preset": "file_explorer", "args": {"action": "read", "path": m.group(1)}, "raw": "[[forced]]"}
                 logger.info("[TOOL_TRACE] FORCE_MATCH=%s", result)
                 return result
-        if any(k in lowered for k in ("search for", "find function", "find code", "search code", "grep for")):
+
+        # Detect explicit search_ripgrep requests
+        search_keywords = ("search for", "find function", "find code", "search code", "grep for", "search file")
+        if _has_any(search_keywords) or _has_words_near(("search", "for")) or _has_words_near(("find", "code")) or _has_words_near(("find", "function")):
             query = re.sub(r'.*?(search for|find function|find code|search code|grep for)\s+', '', lowered).strip().split()[0]
+            # Try to extract a quoted query
+            qm = re.search(r'["\']([^"\']+)["\']', lowered)
+            if qm:
+                query = qm.group(1)
             result = {"preset": "search_ripgrep", "args": {"query": query or "def", "path": "."}, "raw": "[[forced]]"}
             logger.info("[TOOL_TRACE] FORCE_MATCH=%s", result)
             return result
+
         logger.info("[TOOL_TRACE] FORCE_MATCH=None")
         return None
 

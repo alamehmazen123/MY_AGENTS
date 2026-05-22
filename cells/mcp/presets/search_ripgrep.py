@@ -32,7 +32,12 @@ def handle(args: dict) -> dict:
         # Try ripgrep first
         try:
             result = subprocess.run(
-                ["rg", "-n", "--no-heading", query, str(p)],
+                [
+                    "rg", "-n", "--no-heading",
+                    "--glob", "!.*", "--glob", "!node_modules", "--glob", "!__pycache__",
+                    "--glob", "!.venv", "--glob", "!venv", "--glob", "!dist", "--glob", "!build",
+                    query, str(p)
+                ],
                 capture_output=True, text=True, timeout=30
             )
             matches = []
@@ -48,8 +53,14 @@ def handle(args: dict) -> dict:
         # Fallback to Python walk (jailed)
         matches = []
         pattern = re.compile(re.escape(query))
+        skip = {"node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".git", ".pytest_cache"}
         for root, _, files in os.walk(str(p)):
+            rel_root = Path(root).relative_to(p)
+            if any(part.startswith(".") or part in skip for part in rel_root.parts):
+                continue
             for fname in files:
+                if fname.startswith("."):
+                    continue
                 fpath = Path(root) / fname
                 try:
                     text = fpath.read_text(encoding="utf-8", errors="replace")
