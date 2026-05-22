@@ -136,6 +136,51 @@ export const ALL_MODELS = [
   'deepseek-coder:latest',
 ]
 
+export type ModelTier = 'Weak' | 'Moderate' | 'Strong' | 'Very Strong'
+
+export interface ModelMeta {
+  tier: ModelTier
+  note: string
+}
+
+// Explicit notes for known local models. Anything not listed falls back to a
+// size-based heuristic in modelMeta() below.
+const MODEL_NOTES: Record<string, ModelMeta> = {
+  'tinyllama': { tier: 'Weak', note: 'tiny 1.1B — testing / very simple chat only' },
+  'qwen3:1.7b': { tier: 'Weak', note: '1.7B — quick, simple Q&A' },
+  'deepseek-coder:1.3b': { tier: 'Weak', note: '1.3B coder — short snippets, fast' },
+  'deepseek-coder:latest': { tier: 'Weak', note: '1.3B coder — short snippets, fast' },
+  'qwen2.5-coder:3b': { tier: 'Moderate', note: '3B coder — everyday code, fast' },
+  'qwen3:4b': { tier: 'Moderate', note: '4B — balanced general tasks' },
+  'qwen3:8b': { tier: 'Strong', note: '8B — solid reasoning & review' },
+  'deepseek-r1:8b': { tier: 'Strong', note: '8B reasoning — capable but slower' },
+  'qwen2.5-coder:7b': { tier: 'Strong', note: '7B coder — strong code gen & review' },
+  'deepseek-coder:6.7b': { tier: 'Strong', note: '6.7B coder — good code review' },
+  'llama3:8b': { tier: 'Strong', note: '8B — strong general chat' },
+  'llama3:latest': { tier: 'Strong', note: '8B — strong general chat' },
+  'qwen2.5-coder:14b': { tier: 'Very Strong', note: '14B coder — best code, slow on CPU' },
+  'phi4:14b': { tier: 'Very Strong', note: '14B — strong reasoning, slow on CPU' },
+  'gpt-oss:20b': { tier: 'Very Strong', note: '20B — most capable, very slow on CPU' },
+}
+
+export function modelMeta(name: string): ModelMeta {
+  if (MODEL_NOTES[name]) return MODEL_NOTES[name]
+  // Heuristic: parse the parameter size from the tag (e.g. ":7b", "-1.3b").
+  const m = name.match(/(\d+(?:\.\d+)?)\s*b\b/i)
+  const size = m ? parseFloat(m[1]) : 0
+  const coder = /coder|code/i.test(name)
+  if (size === 0) return { tier: 'Moderate', note: 'unknown size — test before relying on it' }
+  if (size < 2) return { tier: 'Weak', note: `${size}B — simple tasks only` }
+  if (size < 5) return { tier: 'Moderate', note: `${size}B${coder ? ' coder' : ''} — everyday tasks` }
+  if (size < 10) return { tier: 'Strong', note: `${size}B${coder ? ' coder' : ''} — capable` }
+  return { tier: 'Very Strong', note: `${size}B${coder ? ' coder' : ''} — heavy, slow on CPU` }
+}
+
+export function modelLabel(name: string): string {
+  const meta = modelMeta(name)
+  return `${name}  ·  ${meta.tier} — ${meta.note}`
+}
+
 const MCP_PRESETS = [
   'file_explorer', 'code_analyzer', 'git_mcp', 'search_ripgrep',
   'python_exec', 'terminal_whitelist', 'diff_engine', 'refactor_safe',

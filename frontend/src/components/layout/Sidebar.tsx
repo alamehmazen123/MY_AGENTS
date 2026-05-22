@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useSessionStore } from '../../stores/sessionStore'
-import { useSettingsStore, PRESETS, HIGH_RISK_MODELS } from '../../stores/settingsStore'
+import { useSettingsStore, PRESETS, HIGH_RISK_MODELS, modelLabel, modelMeta } from '../../stores/settingsStore'
 import type { PresetName } from '../../stores/settingsStore'
 
 const MCP_PRESETS = [
@@ -262,9 +262,12 @@ export function Sidebar() {
                 className="w-full bg-gray-800 text-gray-100 text-sm rounded border border-gray-700 px-2 py-1.5 focus:border-blue-500 focus:outline-none"
               >
                 {availableModels.map((m) => (
-                  <option key={m} value={m}>{m}</option>
+                  <option key={m} value={m}>{modelLabel(m)}</option>
                 ))}
               </select>
+              <span className="text-[10px] text-gray-500 mt-0.5 block">
+                {modelMeta(agentAModel).tier} — {modelMeta(agentAModel).note}
+              </span>
               {HIGH_RISK_MODELS.includes(agentAModel) && (
                 <span className="text-[10px] text-red-400 mt-0.5 block font-medium">⚠️ HIGH RISK — slow on CPU</span>
               )}
@@ -280,9 +283,14 @@ export function Sidebar() {
               >
                 <option value="">DISABLED</option>
                 {availableModels.map((m) => (
-                  <option key={m} value={m}>{m}</option>
+                  <option key={m} value={m}>{modelLabel(m)}</option>
                 ))}
               </select>
+              {agentBModel && (
+                <span className="text-[10px] text-gray-500 mt-0.5 block">
+                  {modelMeta(agentBModel).tier} — {modelMeta(agentBModel).note}
+                </span>
+              )}
               {agentBModel && HIGH_RISK_MODELS.includes(agentBModel) && (
                 <span className="text-[10px] text-red-400 mt-0.5 block font-medium">⚠️ HIGH RISK — slow on CPU</span>
               )}

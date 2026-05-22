@@ -23,6 +23,7 @@ export function PromptBar() {
   const [workspaceFolder, setWorkspaceFolder] = useState('')
   const [showFolderInput, setShowFolderInput] = useState(false)
   const [folderPath, setFolderPath] = useState('')
+  const [pickingFolder, setPickingFolder] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sendPrompt = useSessionStore((s) => s.sendPrompt)
   const abortGeneration = useSessionStore((s) => s.abortGeneration)
@@ -57,24 +58,27 @@ export function PromptBar() {
     setFolderPath('')
   }
 
+  const pickFolder = async () => {
+    setPickingFolder(true)
+    try {
+      const res = await fetch('/api/pick-folder', { method: 'POST' })
+      const data = await res.json()
+      if (data.path) {
+        setWorkspaceFolder(data.path)
+        setShowFolderInput(false)
+      } else if (data.error) {
+        // Native dialog unavailable — fall back to manual entry.
+        setShowFolderInput(true)
+      }
+    } catch {
+      setShowFolderInput(true)
+    } finally {
+      setPickingFolder(false)
+    }
+  }
+
   return (
     <div className="p-3 border-t border-gray-700 bg-gray-800">
-      {/* Workspace folder tag */}
-      {workspaceFolder && (
-        <div className="flex items-center gap-2 mb-2">
-          <span className="px-2 py-0.5 bg-green-900/50 text-green-300 text-xs rounded border border-green-800 flex items-center gap-1">
-            📁 {workspaceFolder}
-            <button
-              onClick={() => setWorkspaceFolder('')}
-              className="text-green-400 hover:text-white"
-              title="Remove workspace"
-            >
-              ✕
-            </button>
-          </span>
-        </div>
-      )}
-
       {/* Attached file tags */}
       {attachedFiles.length > 0 && (
         <div className="flex flex-wrap gap-1 mb-2">
@@ -126,11 +130,25 @@ export function PromptBar() {
       <div className="flex items-center gap-2 mb-2">
         <button
           type="button"
-          onClick={() => setShowFolderInput(true)}
-          className="px-3 py-1 text-xs bg-gray-700 rounded hover:bg-gray-600 flex items-center gap-1 transition-colors"
+          onClick={pickFolder}
+          disabled={pickingFolder}
+          className="px-3 py-1 text-xs bg-gray-700 rounded hover:bg-gray-600 flex items-center gap-1 transition-colors disabled:opacity-60"
+          title="Choose a workspace folder"
         >
-          📁 Folder
+          📁 {pickingFolder ? 'Opening…' : 'Folder'}
         </button>
+        {workspaceFolder && (
+          <span className="flex items-center gap-1 text-xs font-medium text-red-500 truncate max-w-[60%]" title={workspaceFolder}>
+            <span className="truncate">{workspaceFolder}</span>
+            <button
+              onClick={() => setWorkspaceFolder('')}
+              className="text-red-400 hover:text-red-300 flex-shrink-0"
+              title="Remove workspace"
+            >
+              ✕
+            </button>
+          </span>
+        )}
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}

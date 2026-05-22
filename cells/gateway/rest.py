@@ -128,6 +128,10 @@ class RESTServer:
         async def api_prompt(req: Request):
             return await self._handle_prompt(req)
 
+        @self.app.post("/api/pick-folder")
+        async def pick_folder():
+            return await self._pick_folder()
+
         @self.app.get("/api/ollama-ps")
         async def ollama_ps():
             return await self._ollama_ps()
@@ -222,6 +226,39 @@ class RESTServer:
                 return {"models": [], "error": f"HTTP {res.status_code}"}
         except Exception as e:
             return {"models": [], "error": str(e)}
+
+    async def _pick_folder(self):
+        """Open a native OS folder-picker dialog (this runs on the user's own
+        machine since the app is localhost) and return the chosen absolute path."""
+        import asyncio
+        import sys
+        script = (
+            "import tkinter as tk\n"
+            "from tkinter import filedialog\n"
+            "r = tk.Tk(); r.withdraw()\n"
+            "try:\n"
+            "    r.attributes('-topmost', True)\n"
+            "except Exception:\n"
+            "    pass\n"
+            "p = filedialog.askdirectory(title='Select workspace folder')\n"
+            "print(p or '')\n"
+            "r.destroy()\n"
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-c", script,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=300)
+            path = out.decode("utf-8", errors="replace").strip()
+            if not path:
+                return {"path": "", "cancelled": True}
+            return {"path": path}
+        except asyncio.TimeoutError:
+            return {"path": "", "error": "picker_timeout"}
+        except Exception as e:
+            return {"path": "", "error": str(e)}
 
     async def _read_file(self, req: Request):
         body = await req.json()
