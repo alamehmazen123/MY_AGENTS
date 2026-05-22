@@ -42,7 +42,19 @@ class LifespanManager:
         print(f"[main] Starting my_agents PRIS v12.0")
         print(f"[main] Environment: {settings.env}")
         print(f"[main] Data dir: {settings.data_dir}")
-        
+
+        # Fail fast with a clear message if a previous instance is still running,
+        # instead of crashing with an opaque uvicorn bind traceback.
+        for port in (settings.api_port, settings.ws_port):
+            if self._port_open("localhost", port):
+                print(f"[main] ERROR: port {port} is already in use.")
+                print(f"[main]   Another my_agents instance is probably still running.")
+                print(f"[main]   On Windows, find and stop it with:")
+                print(f"[main]     PowerShell> Stop-Process -Id (Get-NetTCPConnection -LocalPort {port} -State Listen).OwningProcess -Force")
+                print(f"[main]   Then run 'python kernel/main.py' again.")
+                self._shutdown_event.set()
+                return
+
         # 1. Verify lattice integrity
         assert verifier.verify(), "Lattice verification failed — system cannot start"
         print("[main] Lattice integrity: VERIFIED")
