@@ -23,7 +23,25 @@ if not logger.handlers:
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful AI coding assistant. Answer precisely and accurately. "
     "Only respond with relevant information. If you don't know something, say so. "
-    "Never hallucinate features, APIs, or technologies that don't exist."
+    "Never hallucinate features, APIs, or technologies that don't exist. "
+    "Never invent data such as file names, news headlines, IP addresses, or numbers — "
+    "only state what you were actually given."
+)
+
+# Used INSTEAD of the preset's system prompt once tools have already executed.
+# It stops models (especially coding-tuned ones) from writing code or step-by-step
+# plans and forces them to report the real tool output.
+SYNTHESIS_SYSTEM_PROMPT = (
+    "You are a precise assistant reporting the results of tools that have ALREADY been run. "
+    "The TOOL EXECUTION RESULTS below are real, actual output from the user's machine.\n"
+    "RULES:\n"
+    "1. Report the actual results directly and concisely. Answer each part of the user's request.\n"
+    "2. Do NOT write code. Do NOT describe steps to perform. Do NOT explain how tools work. "
+    "The work is already done — just give the answer.\n"
+    "3. NEVER invent or guess data. Use ONLY the values present in the tool results. "
+    "If a result is empty, errored, or a value was not found, say so plainly "
+    "(e.g. 'CNN did not return a headline').\n"
+    "4. When asked for files of a specific type, list ONLY the files that actually match that type."
 )
 
 REVIEW_SYSTEM_PROMPT = (
@@ -458,16 +476,23 @@ class RESTServer:
                     counts_str = ", ".join(
                         f"{ext}={n}" for ext, n in sorted(ext_counts.items(), key=lambda kv: -kv[1])
                     )
+                    # If the user named specific extensions (e.g. ".txt"), give the
+                    # EXACT matching list so the model can't mistake .lnk/folders for it.
+                    import re as _re
+                    filtered_blocks = ""
+                    for ext in dict.fromkeys(_re.findall(r'\.([a-z0-9]{1,6})\b', prompt_text.lower())):
+                        matches = [i.get("name") for i in files if i.get("name", "").lower().endswith("." + ext)]
+                        filtered_blocks += f"[EXACT .{ext} FILES ({len(matches)}): {', '.join(matches) if matches else 'none'}]\n"
                     current_prompt = (
                         f"[WORKSPACE: {workspace_folder}]\n"
                         f"[FACTS — workspace root: {len(files)} files, {len(dirs)} folders]\n"
                         f"[FILE COUNTS BY EXTENSION: {counts_str}]\n"
+                        f"{filtered_blocks}"
                         f"[COMPLETE FILE/FOLDER LIST: {names}]\n"
-                        "The FACTS and COUNTS above are computed directly from the file system "
-                        "and are exact. For questions about WHICH or HOW MANY files exist (by "
-                        "extension or otherwise), answer using these numbers verbatim and do NOT "
-                        "call a tool or recount yourself. Only use file_explorer to READ a file's "
-                        "contents or to WRITE/modify files, with paths relative to the workspace.\n\n"
+                        "The FACTS and lists above are computed directly from the file system and "
+                        "are exact. When asked for files of a specific type, use the matching "
+                        "'EXACT .<ext> FILES' list verbatim — do NOT include folders or other file "
+                        "types. For counts, use the numbers above. Do NOT call a tool or recount.\n\n"
                         f"{prompt_text}"
                     )
                     context_injected = True
@@ -476,6 +501,7 @@ class RESTServer:
 
         final_response = ""
         any_tool_executed = False
+        all_tool_results: list = []  # real tool output, also returned for Agent-B
 
         # Run any clearly-intended tools UP FRONT (deterministically, from the
         # prompt) and feed the results in, so the model answers in a single pass
@@ -495,13 +521,12 @@ class RESTServer:
                     result = await mcp_cell.invoke(tc["preset"], args, workspace=workspace_folder or None)
                     pre_results.append({"call": tc, "result": result})
                     any_tool_executed = True
+                all_tool_results.extend(pre_results)
                 current_prompt = self._build_continuation_prompt(current_prompt, "(no attempt yet)", pre_results)
-                # Tools already ran — let the model simply answer from the results
-                # in one pass (no tool instructions => no extra tool-call rounds).
-                full_system = (
-                    system + "\nAnswer the user's request using the TOOL EXECUTION RESULTS "
-                    "provided. Be direct and use the actual data."
-                )
+                # Tools already ran — REPLACE the preset system prompt entirely with
+                # the synthesis prompt so coding-tuned models report results instead
+                # of writing code/plans, and don't fabricate missing values.
+                full_system = SYNTHESIS_SYSTEM_PROMPT
 
         # The base request used when rebuilding continuation prompts. Includes the
         # injected workspace facts + any up-front tool results.
@@ -613,6 +638,7 @@ class RESTServer:
                         tool_results.append({"call": tc, "result": result})
                         any_tool_executed = True
 
+                    all_tool_results.extend(tool_results)
                     current_prompt = self._build_continuation_prompt(base_prompt, response_text, tool_results)
                     logger.info("stage=F context_after_tool prompt_len=%s", len(current_prompt))
                     # After first turn, simplify system prompt
@@ -651,10 +677,20 @@ class RESTServer:
         else:
             logger.info("[TOOL_TRACE] stage=H final_response_no_tools")
 
+        # Build a compact, ground-truth tool context to hand to Agent-B so its
+        # review is checked against real data instead of being fabricated.
+        tool_context = ""
+        for tr in all_tool_results:
+            rj = json.dumps(tr["result"])
+            if len(rj) > 1500:
+                rj = rj[:1500] + " …(truncated)"
+            tool_context += f"- {tr['call']['preset']}({json.dumps(tr['call']['args'])}): {rj}\n"
+
         return {
             "output": final_response,
             "model": model,
             "done": True,
+            "tool_context": tool_context,
         }
 
     async def _unload_model_quiet(self, model: str):
@@ -742,6 +778,20 @@ class RESTServer:
                 if site in lowered:
                     url = dom
                     break
+        # For news/headline intent, prefer the site's RSS feed — its homepage is
+        # JS-rendered and contains no readable headlines, but the RSS feed does.
+        news_intent = any(w in lowered for w in ("news", "headline", "latest", "top stories"))
+        if url and news_intent:
+            host = url.split("//")[-1].split("/")[0].lower()
+            rss = {
+                # CNN's free RSS is frozen; its text-only site is static & current.
+                "cnn.com": "https://lite.cnn.com",
+                "www.cnn.com": "https://lite.cnn.com",
+                "bbc.com": "http://feeds.bbci.co.uk/news/rss.xml",
+                "www.bbc.com": "http://feeds.bbci.co.uk/news/rss.xml",
+            }.get(host)
+            if rss:
+                url = rss
         if url:
             calls.append({"preset": "web_fetch", "args": {"url": url}, "raw": "[[forced]]"})
 

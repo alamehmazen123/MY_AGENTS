@@ -70,7 +70,7 @@ async function callOllama(
     contextLength?: number
     signal?: AbortSignal
   }
-): Promise<string> {
+): Promise<{ text: string; toolContext: string }> {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), 280_000)
 
@@ -110,18 +110,18 @@ async function callOllama(
     }
     const data = await res.json()
     if (data.error) {
-      return `[Error: ${data.error}] ${data.output || ''}`
+      return { text: `[Error: ${data.error}] ${data.output || ''}`, toolContext: '' }
     }
-    return data.output || '[No response from model]'
+    return { text: data.output || '[No response from model]', toolContext: data.tool_context || '' }
   } catch (e: any) {
     clearTimeout(timeoutId)
     if (e.name === 'AbortError') {
       if (opts?.signal?.aborted) {
-        return '[Stopped by user]'
+        return { text: '[Stopped by user]', toolContext: '' }
       }
-      return '[Error: Request timed out after 185s. The model may be overloaded or Ollama is not responding.]'
+      return { text: '[Error: Request timed out. The model may be overloaded or Ollama is not responding.]', toolContext: '' }
     }
-    return `[Error: ${e.message}]`
+    return { text: `[Error: ${e.message}]`, toolContext: '' }
   }
 }
 
@@ -429,7 +429,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
         // Agent-A is the "doer" — it always has tool access (the whole point of a
         // Claude-Code-style agent). The MCP toggle only affects whether the user
         // can turn this off explicitly; by default A can read/write the workspace.
-        const responseA = await callOllama(fullPrompt, settings.agentAModel, settings.systemPromptA, {
+        const aResult = await callOllama(fullPrompt, settings.agentAModel, settings.systemPromptA, {
           workspaceFolder: folder,
           attachedFiles: files,
           enableTools: settings.preset !== 'CHAT',
@@ -437,6 +437,8 @@ export const useSessionStore = create<SessionState>((set, get) => {
           contextLength: settings.contextLength,
           signal: abortCtrl.signal,
         })
+        const responseA = aResult.text
+        const toolContextA = aResult.toolContext
 
         if (isAborted() || responseA === '[Stopped by user]') {
           set((s) => {
@@ -504,22 +506,34 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
         // ── Phase 2: Agent-B reviews ──
         const truncatedA = truncate(responseA, 4000)
-        const reviewPrompt = `You are a senior code reviewer. The user asked:
+        const groundTruth = toolContextA
+          ? `\nACTUAL TOOL RESULTS (ground truth — the real data from the user's machine):\n${truncate(toolContextA, 3000)}\n`
+          : ''
+        const reviewPrompt = `The user asked:
 
 """${text}"""
 
-Another agent responded with:
+Agent-A answered:
 
 """${truncatedA}"""
+${groundTruth}
+Your task: produce the BEST final answer to the user's request.
+- Correct any mistakes in Agent-A's answer using the ACTUAL TOOL RESULTS above as the source of truth.
+- CRITICAL: never invent or guess data. Do NOT make up file names, news headlines, IP addresses, or numbers. If the tool results don't contain something (e.g. no headline was returned), say it is unavailable — do NOT fabricate a plausible value.
+- Do NOT write code or describe steps; the tools already ran. Just give the direct, corrected answer.
+- Be concise. Do not repeat raw JSON.`
 
-Your task: Review the response above. Identify any bugs, errors, hallucinations, or incorrect assumptions. Then provide YOUR OWN corrected and improved answer. Be concise but thorough. Do NOT repeat raw JSON or error messages verbatim.`
+        const reviewSystem =
+          'You are a fact-checking assistant. You verify and correct an answer using the real tool results provided. ' +
+          'You never fabricate data and never write code — you report the actual results.'
 
-        const responseB = await callOllama(reviewPrompt, settings.agentBModel, settings.systemPromptB, {
+        const bResult = await callOllama(reviewPrompt, settings.agentBModel, reviewSystem, {
           enableTools: false,
           temperature: settings.temperatureB,
           contextLength: settings.contextLength,
           signal: abortCtrl.signal,
         })
+        const responseB = bResult.text
 
         if (isAborted() || responseB === '[Stopped by user]') {
           set((s) => {
