@@ -61,7 +61,7 @@ export const PRESETS: Record<PresetName, PresetConfig> = {
       systemPrompt: 'You are an expert programmer. Write clean, efficient, well-commented code. Include error handling. Use the best practices for the requested language.',
     },
     agentB: {
-      name: 'qwen2.5-coder:7b',
+      name: 'qwen2.5-coder:3b',
       contextLength: 8192,
       temperature: 0.3,
       systemPrompt: 'You are a code reviewer. Review the code for bugs, security issues, and optimization opportunities. Provide the corrected/improved version with explanations.',
@@ -123,21 +123,17 @@ export const PRESETS: Record<PresetName, PresetConfig> = {
 
 export const HIGH_RISK_MODELS = ['deepseek-r1:8b', 'qwen2.5-coder:14b', 'gpt-oss:20b']
 
+// Baseline list; the live set is merged from /api/models at runtime (fetchModels).
 export const ALL_MODELS = [
   'tinyllama',
   'qwen3:1.7b',
   'qwen3:4b',
   'qwen3:8b',
   'qwen2.5-coder:3b',
-  'qwen2.5-coder:7b',
+  'qwen2.5-coder:14b',
   'deepseek-coder:1.3b',
   'deepseek-coder:6.7b',
   'deepseek-coder:latest',
-  'qwen2.5-coder:14b',
-  'llama3:8b',
-  'phi4:14b',
-  'deepseek-r1:8b',
-  'gpt-oss:20b',
 ]
 
 const MCP_PRESETS = [

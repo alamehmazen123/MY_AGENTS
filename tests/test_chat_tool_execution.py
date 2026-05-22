@@ -198,5 +198,106 @@ async def test_no_tools_flag_disables_forced_detection(monkeypatch):
     assert len(mcp.invocations) == 0, f"Expected 0 invocations with no_tools=True, got {mcp.invocations}"
 
 
+def make_recording_httpx(response_text: str, posts: list):
+    """FakeClient that records every /api/generate payload it receives."""
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return {"response": response_text, "done": True}
+        def text(self):
+            return ""
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def post(self, url, *args, **kwargs):
+            if "generate" in str(url):
+                posts.append(kwargs.get("json", {}))
+            return FakeResponse()
+        async def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    return FakeClient
+
+
+@pytest.mark.asyncio
+async def test_generation_caps_output_and_keeps_model_resident(monkeypatch):
+    """Regression: every generate call must cap num_predict and keep the model
+    resident (keep_alive != 0) during the loop, with a single unload at the end."""
+    posts: list = []
+    server = make_server(FakeMCPCell())
+    monkeypatch.setattr("httpx.AsyncClient", make_recording_httpx("Just a plain answer.", posts))
+
+    class FakeReq:
+        async def json(self):
+            return {"prompt": "explain recursion", "model": "dummy", "no_tools": True}
+
+    await server._handle_prompt(FakeReq())
+
+    # At least the main generate + the final unload generate were sent.
+    assert len(posts) >= 2
+    main_call = posts[0]
+    assert main_call["options"]["num_predict"] == 2048, "output must be capped"
+    assert main_call["keep_alive"] == "5m", "model must stay resident during the turn"
+    # The last call is the explicit unload.
+    assert posts[-1]["keep_alive"] == 0, "turn must end with a single unload"
+
+
+@pytest.mark.asyncio
+async def test_forced_tool_fires_only_once(monkeypatch):
+    """Regression: a 'list files' request must invoke file_explorer exactly once,
+    not loop the maximum number of iterations (the old hang)."""
+    mcp = FakeMCPCell()
+    server = make_server(mcp)
+    # Model never emits a real tool call, so only forced detection can fire.
+    monkeypatch.setattr("httpx.AsyncClient", make_fake_httpx("Here is some prose without any tool call."))
+
+    class FakeReq:
+        async def json(self):
+            return {"prompt": "list the files in the current directory", "model": "dummy", "no_tools": False}
+
+    await server._handle_prompt(FakeReq())
+    file_calls = [i for i in mcp.invocations if i[0] == "file_explorer"]
+    assert len(file_calls) == 1, f"forced tool must fire once, got {len(file_calls)}: {mcp.invocations}"
+
+
+@pytest.mark.asyncio
+async def test_missing_model_fails_fast(monkeypatch):
+    """Regression: an uninstalled model returns a clear error instead of hanging."""
+    server = make_server(FakeMCPCell())
+
+    class ModelListResponse:
+        status_code = 200
+        def json(self):
+            return {"models": [{"name": "qwen3:4b"}, {"name": "deepseek-coder:1.3b"}]}
+        def text(self):
+            return ""
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            pass
+        async def get(self, *a, **k):
+            return ModelListResponse()
+        async def post(self, *a, **k):
+            raise AssertionError("should not call generate for a missing model")
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+    class FakeReq:
+        async def json(self):
+            return {"prompt": "hi", "model": "not-installed:99b", "no_tools": True}
+
+    result = await server._handle_prompt(FakeReq())
+    assert result.get("error") == "model_not_installed"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
