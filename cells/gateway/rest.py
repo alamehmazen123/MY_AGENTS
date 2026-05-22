@@ -157,7 +157,7 @@ class RESTServer:
                         "name": "CODING",
                         "description": "Fast code generation + quality review. ~5.5 GB RAM.",
                         "agent_a": {"name": "deepseek-coder:1.3b", "context_length": 8192, "temperature": 0.2},
-                        "agent_b": {"name": "qwen2.5-coder:7b", "context_length": 8192, "temperature": 0.3},
+                        "agent_b": {"name": "qwen2.5-coder:3b", "context_length": 8192, "temperature": 0.3},
                         "mcp_tools_enabled": True,
                     },
                     "SUPER_CODING": {
@@ -335,6 +335,22 @@ class RESTServer:
         if not prompt_text:
             return {"error": "empty_prompt", "output": "[Error: empty prompt received]"}
 
+        # Fail fast if the requested model is not installed — otherwise Ollama
+        # may stall trying to resolve it, which looks like a hang to the user.
+        available = (await self._list_ollama_models()).get("models", [])
+        if available and model not in available:
+            base = model.split(":")[0]
+            if not any(m == model or m.split(":")[0] == base for m in available):
+                return {
+                    "error": "model_not_installed",
+                    "output": (
+                        f"[Error: model '{model}' is not installed in Ollama. "
+                        f"Run `ollama pull {model}` or pick an installed model. "
+                        f"Installed: {', '.join(available) or 'none'}]"
+                    ),
+                    "model": model,
+                }
+
         mcp_cell = getattr(self._gateway, "_mcp", None)
         full_system = system
         tools_enabled = not no_tools and mcp_cell is not None
@@ -350,13 +366,13 @@ class RESTServer:
 
         MAX_TOOL_ITERATIONS = 3
 
-        for iteration in range(MAX_TOOL_ITERATIONS + 1):
-            # Safety cap
-            MAX_PROMPT_LEN = 30000
-            if len(current_prompt) > MAX_PROMPT_LEN:
-                current_prompt = current_prompt[:MAX_PROMPT_LEN] + "\n\n[...truncated by backend]"
+        try:
+            for iteration in range(MAX_TOOL_ITERATIONS + 1):
+                # Safety cap
+                MAX_PROMPT_LEN = 30000
+                if len(current_prompt) > MAX_PROMPT_LEN:
+                    current_prompt = current_prompt[:MAX_PROMPT_LEN] + "\n\n[...truncated by backend]"
 
-            try:
                 async with httpx.AsyncClient(timeout=180) as client:
                     payload = {
                         "model": model,
@@ -371,11 +387,17 @@ class RESTServer:
                         options["temperature"] = temperature
                     if context_length:
                         options["num_ctx"] = context_length
-                    if options:
-                        payload["options"] = options
+                    # Cap output length. Without this, small models can ramble until
+                    # they fill the whole context window (thousands of tokens), which
+                    # takes minutes and trips the request timeout. Override via body.
+                    options["num_predict"] = body.get("max_tokens", 2048)
+                    payload["options"] = options
 
-                    # Force unload after generation to guarantee zero models between agents
-                    payload["keep_alive"] = 0
+                    # Keep the model resident across tool iterations to avoid
+                    # reloading it from disk every round (the main source of latency).
+                    # The single explicit unload happens in the finally block below,
+                    # guaranteeing zero models loaded once this agent's turn ends.
+                    payload["keep_alive"] = "5m"
 
                     logger.info("stage=B ollama_request iteration=%s prompt_len=%s system_len=%s", iteration, len(current_prompt), len(full_system or ""))
 
@@ -409,8 +431,10 @@ class RESTServer:
                     tool_calls = self._extract_tool_calls(response_text)
                     logger.info("[TOOL_TRACE] stage=C extracted_tool_count=%s", len(tool_calls))
 
-                    # PHASE 7 — Force tool execution for explicit tool requests
-                    if not tool_calls:
+                    # PHASE 7 — Force tool execution for explicit tool requests.
+                    # Only on the first turn: once tools have run, the model must
+                    # answer from the results instead of looping on the same request.
+                    if not tool_calls and iteration == 0 and not any_tool_executed:
                         forced = self._force_tool_detection(prompt_text)
                         if forced:
                             logger.info("[TOOL_TRACE] stage=C_forced forced_tool_preset=%s forced_args=%s", forced["preset"], json.dumps(forced["args"]))
@@ -444,16 +468,32 @@ class RESTServer:
                     # After first turn, simplify system prompt
                     full_system = system + "\nContinue based on the tool results. Do not use more tools unless necessary."
 
-            except httpx.ConnectError as e:
-                logger.info("stage=G ollama_connect_error")
-                return {
-                    "error": "ollama_not_reachable",
-                    "output": f"Cannot connect to Ollama at {settings.ollama_host}. Make sure 'ollama serve' is running.",
-                    "model": model,
-                }
-            except Exception as e:
-                logger.info("stage=G exception=%s", str(e))
-                return {"error": str(e), "output": f"[Error: {str(e)}]", "model": model}
+        except httpx.ConnectError as e:
+            logger.info("stage=G ollama_connect_error")
+            return {
+                "error": "ollama_not_reachable",
+                "output": f"Cannot connect to Ollama at {settings.ollama_host}. Make sure 'ollama serve' is running.",
+                "model": model,
+            }
+        except httpx.TimeoutException:
+            logger.info("stage=G ollama_timeout")
+            return {
+                "error": "ollama_timeout",
+                "output": (
+                    f"[Error: '{model}' did not respond within 180s. "
+                    "It may be cold-loading a large model or generating too much. "
+                    "Try a smaller model or a simpler prompt.]"
+                ),
+                "model": model,
+            }
+        except Exception as e:
+            logger.info("stage=G exception=%s", str(e))
+            return {"error": str(e) or "unknown_error", "output": f"[Error: {str(e) or 'unknown error'}]", "model": model}
+        finally:
+            # Single unload at the end of this agent's turn — guarantees zero
+            # models loaded before the next agent (B) starts, without paying the
+            # reload cost on every tool iteration.
+            await self._unload_model_quiet(model)
 
         # PHASE 11 — Hallucination prevention
         if any_tool_executed:
@@ -466,6 +506,21 @@ class RESTServer:
             "model": model,
             "done": True,
         }
+
+    async def _unload_model_quiet(self, model: str):
+        """Best-effort unload of a model from Ollama (keep_alive=0). Never raises."""
+        import httpx
+        if not model:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                await client.post(
+                    f"{settings.ollama_host}/api/generate",
+                    json={"model": model, "prompt": "", "stream": False, "keep_alive": 0},
+                    timeout=30,
+                )
+        except Exception:
+            pass
 
     def _extract_tool_calls(self, text: str):
         import re
