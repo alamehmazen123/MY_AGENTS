@@ -64,6 +64,8 @@ class MCPCell(BaseCell):
             ("project_scaffold", {ToolCapability.FILESYSTEM}, ResourceLimits(memory_mb=256, timeout=15)),
             ("rollback_manager", {ToolCapability.FILESYSTEM}, ResourceLimits(memory_mb=512, timeout=30)),
             ("structured_terminal", {ToolCapability.SUBPROCESS}, ResourceLimits(memory_mb=256, timeout=30)),
+            ("web_fetch", {ToolCapability.NETWORK}, ResourceLimits(memory_mb=256, timeout=30)),
+            ("network_info", {ToolCapability.NETWORK}, ResourceLimits(memory_mb=128, timeout=20)),
         ]
 
         for name, caps, limits in presets:

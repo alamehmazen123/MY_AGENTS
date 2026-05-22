@@ -18,6 +18,8 @@ const MCP_PRESETS = [
   { id: 'health_monitor', name: 'Health Monitor', desc: 'System health checks' },
   { id: 'project_scaffold', name: 'Project Scaffold', desc: 'Generate project templates' },
   { id: 'rollback_manager', name: 'Rollback Manager', desc: 'Undo changes safely' },
+  { id: 'web_fetch', name: 'Web Fetch', desc: 'Fetch a URL (news, docs, pages)' },
+  { id: 'network_info', name: 'Network Info', desc: 'Local & public IP address' },
 ]
 
 const PRESET_NAMES: PresetName[] = ['CHAT', 'REVIEWING', 'CODING', 'SUPER_CODING', 'EXECUTION', 'CUSTOM']
@@ -28,6 +30,8 @@ export function Sidebar() {
   const createSession = useSessionStore((s) => s.createSession)
   const switchSession = useSessionStore((s) => s.switchSession)
   const deleteSession = useSessionStore((s) => s.deleteSession)
+  const renameSession = useSessionStore((s) => s.renameSession)
+  const togglePin = useSessionStore((s) => s.togglePin)
   const updateSessionModels = useSessionStore((s) => s.updateSessionModels)
 
   const theme = useSettingsStore((s) => s.theme)
@@ -45,6 +49,8 @@ export function Sidebar() {
   const applyTheme = useSettingsStore((s) => s.applyTheme)
 
   const [activeTab, setActiveTab] = useState<'sessions' | 'mcp' | 'settings'>('sessions')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editName, setEditName] = useState('')
   const [showGenerateMcp, setShowGenerateMcp] = useState(false)
   const [mcpDescription, setMcpDescription] = useState('')
   const [refreshing, setRefreshing] = useState(false)
@@ -118,32 +124,67 @@ export function Sidebar() {
             >
               + New Session
             </button>
-            {sessions.map((sess) => (
+            {[...sessions]
+              .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || a.createdAt - b.createdAt)
+              .map((sess) => (
               <div
                 key={sess.id}
                 onClick={() => switchSession(sess.id)}
-                className={`group flex items-center justify-between px-3 py-2 rounded-md cursor-pointer text-sm transition-colors ${
+                className={`group flex items-center justify-between px-2 py-2 rounded-md cursor-pointer text-sm transition-colors ${
                   sess.id === activeId
                     ? 'bg-gray-700 text-white'
                     : 'text-gray-300 hover:bg-gray-800 hover:text-white'
                 }`}
               >
-                <span className="truncate">{sess.name}</span>
-                {sess.id === activeId && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 flex-shrink-0" />
+                {editingId === sess.id ? (
+                  <input
+                    autoFocus
+                    value={editName}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setEditName(e.target.value)}
+                    onBlur={() => { renameSession(sess.id, editName); setEditingId(null) }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { renameSession(sess.id, editName); setEditingId(null) }
+                      if (e.key === 'Escape') setEditingId(null)
+                    }}
+                    className="flex-1 min-w-0 bg-gray-900 text-white text-sm rounded px-1.5 py-0.5 border border-blue-500 focus:outline-none"
+                  />
+                ) : (
+                  <span
+                    className="truncate flex-1 flex items-center gap-1"
+                    onDoubleClick={(e) => { e.stopPropagation(); setEditingId(sess.id); setEditName(sess.name) }}
+                    title="Double-click to rename"
+                  >
+                    {sess.pinned && <span className="text-yellow-400 flex-shrink-0">📌</span>}
+                    <span className="truncate">{sess.name}</span>
+                  </span>
                 )}
-                {sess.id !== activeId && (
+                <div className="flex items-center gap-0.5 flex-shrink-0 ml-1">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); togglePin(sess.id) }}
+                    className={`text-xs px-1 transition-opacity ${sess.pinned ? 'text-yellow-400' : 'opacity-0 group-hover:opacity-100 text-gray-500 hover:text-yellow-400'}`}
+                    title={sess.pinned ? 'Unpin' : 'Pin'}
+                  >
+                    {sess.pinned ? '★' : '☆'}
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setEditingId(sess.id); setEditName(sess.name) }}
+                    className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-blue-400 text-xs px-1 transition-opacity"
+                    title="Rename session"
+                  >
+                    ✎
+                  </button>
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      deleteSession(sess.id)
+                      if (sessions.length > 1) deleteSession(sess.id)
                     }}
                     className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 text-xs px-1 transition-opacity"
                     title="Delete session"
                   >
                     ✕
                   </button>
-                )}
+                </div>
               </div>
             ))}
           </div>

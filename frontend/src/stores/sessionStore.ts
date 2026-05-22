@@ -24,6 +24,7 @@ export interface Session {
   id: string
   name: string
   createdAt: number
+  pinned?: boolean
   agentA: AgentState
   agentB: AgentState
   attachedFiles: AttachedFile[]
@@ -44,6 +45,8 @@ export interface SessionState {
   createSession: () => void
   switchSession: (id: string) => void
   deleteSession: (id: string) => void
+  renameSession: (id: string, name: string) => void
+  togglePin: (id: string) => void
   clear: () => void
   updateSessionModels: () => void
 }
@@ -190,11 +193,53 @@ function makeSession(id: string, name: string): Session {
   }
 }
 
+const SESSIONS_KEY = 'my_agents_sessions_v1'
+
+function persistSessions(sessions: Session[], activeSessionId: string) {
+  try {
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify({ sessions, activeSessionId }))
+  } catch {
+    // Storage full or unavailable — non-fatal.
+  }
+}
+
+function loadSessions(): { sessions: Session[]; activeSessionId: string } | null {
+  try {
+    const raw = localStorage.getItem(SESSIONS_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed?.sessions?.length) return null
+    // Restore sessions but reset any transient "in-flight" runtime state.
+    const sessions: Session[] = parsed.sessions.map((s: any) => ({
+      ...s,
+      agentA: {
+        ...s.agentA,
+        status: 'online',
+        messages: (s.agentA?.messages || []).map((m: any) => ({ ...m, streaming: false })),
+      },
+      agentB: {
+        ...s.agentB,
+        status: s.agentB?.model ? 'waiting' : 'disabled',
+        messages: (s.agentB?.messages || []).map((m: any) => ({ ...m, streaming: false })),
+      },
+    }))
+    const activeSessionId =
+      parsed.activeSessionId && sessions.some((x) => x.id === parsed.activeSessionId)
+        ? parsed.activeSessionId
+        : sessions[0].id
+    return { sessions, activeSessionId }
+  } catch {
+    return null
+  }
+}
+
 export const useSessionStore = create<SessionState>((set, get) => {
-  const initial = makeSession('sess-1', 'Session 1')
+  const restored = typeof window !== 'undefined' ? loadSessions() : null
+  const initialSessions = restored ? restored.sessions : [makeSession('sess-1', 'Session 1')]
+  const initialActive = restored ? restored.activeSessionId : initialSessions[0].id
   return {
-    sessions: [initial],
-    activeSessionId: initial.id,
+    sessions: initialSessions,
+    activeSessionId: initialActive,
     isGenerating: false,
     unloadStatus: '',
 
@@ -207,6 +252,20 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
     switchSession: (id: string) => {
       set({ activeSessionId: id })
+    },
+
+    renameSession: (id: string, name: string) => {
+      const trimmed = name.trim()
+      if (!trimmed) return
+      set((s) => ({
+        sessions: s.sessions.map((x) => (x.id === id ? { ...x, name: trimmed } : x)),
+      }))
+    },
+
+    togglePin: (id: string) => {
+      set((s) => ({
+        sessions: s.sessions.map((x) => (x.id === id ? { ...x, pinned: !x.pinned } : x)),
+      }))
     },
 
     deleteSession: (id: string) => {
@@ -527,3 +586,13 @@ Your task: Review the response above. Identify any bugs, errors, hallucinations,
       }),
   }
 })
+
+// Persist sessions to localStorage on every change (debounced) so they survive
+// page reloads and backend restarts. Only the user deletes/renames/pins them.
+if (typeof window !== 'undefined') {
+  let timeout: ReturnType<typeof setTimeout>
+  useSessionStore.subscribe((state) => {
+    clearTimeout(timeout)
+    timeout = setTimeout(() => persistSessions(state.sessions, state.activeSessionId), 250)
+  })
+}

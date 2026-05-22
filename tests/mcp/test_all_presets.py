@@ -35,6 +35,7 @@ CASES = [
     ("rollback_manager", {"action": "snapshot", "path": "sample.py"}),
     ("structured_terminal", {"command": "pwd"}),
     ("structured_terminal", {"command": "ls", "path": "."}),
+    ("network_info", {}),  # local IP works without internet
 ]
 
 
@@ -61,7 +62,7 @@ async def test_every_preset_runs_without_error(workspace):
 
 
 @pytest.mark.asyncio
-async def test_all_14_presets_are_registered():
+async def test_all_presets_are_registered():
     cell = MCPCell()
     await cell.init()
     names = {t["name"] for t in cell.list_tools()}
@@ -69,7 +70,7 @@ async def test_all_14_presets_are_registered():
         "file_explorer", "code_analyzer", "git_mcp", "search_ripgrep", "python_exec",
         "diff_engine", "refactor_safe", "doc_generator", "dependency_inspector",
         "workspace_indexer", "health_monitor", "project_scaffold", "rollback_manager",
-        "structured_terminal",
+        "structured_terminal", "web_fetch", "network_info",
     }
     missing = expected - names
     assert not missing, f"missing presets: {missing}"

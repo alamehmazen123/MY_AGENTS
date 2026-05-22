@@ -50,7 +50,11 @@ TOOL_INSTRUCTIONS = (
     "- search_ripgrep: Search text inside files.\n"
     '  [[MCP:search_ripgrep:{"query":"def main","path":"."}]]\n'
     "- python_exec: Execute Python code safely.\n"
-    '  [[MCP:python_exec:{"code":"print(1+1)"}]]\n\n'
+    '  [[MCP:python_exec:{"code":"print(1+1)"}]]\n'
+    "- web_fetch: Fetch a web page and read its title/text (use for news sites, docs, any URL).\n"
+    '  [[MCP:web_fetch:{"url":"https://www.cnn.com"}]]\n'
+    "- network_info: Get this machine's local and public IP address.\n"
+    '  [[MCP:network_info:{}]]\n\n'
     "RULES:\n"
     "1. To read a file's contents or to create/modify files, you MUST output a tool call line. "
     "If a COMPLETE LIST OF FILES is already provided in the context, answer listing/counting "
@@ -387,6 +391,12 @@ class RESTServer:
         model = body.get("model", settings.ollama_default_model)
         system = body.get("system", DEFAULT_SYSTEM_PROMPT)
         workspace_folder = self._resolve_workspace(body.get("workspace_folder", ""))
+        # If the user didn't pick a folder, try to infer one from the words
+        # ("my desktop", "downloads", ...) so file requests still target the right place.
+        if not workspace_folder:
+            workspace_folder = self._infer_workspace_from_prompt(prompt_text)
+            if workspace_folder:
+                logger.info("[TOOL_TRACE] inferred_workspace=%s", workspace_folder)
         no_tools = body.get("no_tools", False)
         temperature = body.get("temperature")
         context_length = body.get("context_length")
@@ -464,11 +474,38 @@ class RESTServer:
             except Exception as e:
                 logger.info("[TOOL_TRACE] workspace_context_failed=%s", str(e))
 
-        # The base request used when rebuilding continuation prompts. Includes the
-        # injected workspace facts so they survive across tool iterations.
-        base_prompt = current_prompt
         final_response = ""
         any_tool_executed = False
+
+        # Run any clearly-intended tools UP FRONT (deterministically, from the
+        # prompt) and feed the results in, so the model answers in a single pass
+        # instead of emitting tool calls across several slow generations.
+        if tools_enabled:
+            forced = self._force_tool_detection(prompt_text, context_injected)
+            if forced:
+                pre_results = []
+                for tc in forced:
+                    args = dict(tc["args"])
+                    if workspace_folder:
+                        wf = Path(workspace_folder)
+                        for key in ("path", "dest"):
+                            if isinstance(args.get(key), str) and not Path(args[key]).is_absolute():
+                                args[key] = str(wf / args[key])
+                    logger.info("[TOOL_TRACE] stage=PRE preset=%s args=%s", tc["preset"], json.dumps(args))
+                    result = await mcp_cell.invoke(tc["preset"], args, workspace=workspace_folder or None)
+                    pre_results.append({"call": tc, "result": result})
+                    any_tool_executed = True
+                current_prompt = self._build_continuation_prompt(current_prompt, "(no attempt yet)", pre_results)
+                # Tools already ran — let the model simply answer from the results
+                # in one pass (no tool instructions => no extra tool-call rounds).
+                full_system = (
+                    system + "\nAnswer the user's request using the TOOL EXECUTION RESULTS "
+                    "provided. Be direct and use the actual data."
+                )
+
+        # The base request used when rebuilding continuation prompts. Includes the
+        # injected workspace facts + any up-front tool results.
+        base_prompt = current_prompt
 
         MAX_TOOL_ITERATIONS = 3
 
@@ -547,11 +584,11 @@ class RESTServer:
                     # PHASE 7 — Force tool execution for explicit tool requests.
                     # Only on the first turn: once tools have run, the model must
                     # answer from the results instead of looping on the same request.
-                    if not tool_calls and iteration == 0 and not any_tool_executed and not context_injected:
-                        forced = self._force_tool_detection(prompt_text)
+                    if not tool_calls and iteration == 0 and not any_tool_executed:
+                        forced = self._force_tool_detection(prompt_text, context_injected)
                         if forced:
-                            logger.info("[TOOL_TRACE] stage=C_forced forced_tool_preset=%s forced_args=%s", forced["preset"], json.dumps(forced["args"]))
-                            tool_calls = [forced]
+                            logger.info("[TOOL_TRACE] stage=C_forced forced_calls=%s", json.dumps([f["preset"] for f in forced]))
+                            tool_calls = forced
 
                     if not tool_calls:
                         logger.info("[TOOL_TRACE] stage=C_no_tools breaking_loop")
@@ -660,66 +697,82 @@ class RESTServer:
                         continue
         return calls
 
-    def _force_tool_detection(self, prompt_text: str):
-        """PHASE 7 — Force tool execution when user explicitly requests file operations."""
+    def _infer_workspace_from_prompt(self, prompt_text: str) -> str:
+        """Infer a workspace folder from natural language ('my desktop',
+        'documents', 'downloads', 'home') so the user need not pick one manually."""
+        low = prompt_text.lower()
+        for name in ("desktop", "documents", "downloads", "pictures", "music", "videos"):
+            if name in low:
+                cand = Path.home() / name.capitalize()
+                if cand.is_dir():
+                    return str(cand)
+        if "home folder" in low or "home directory" in low or "my home" in low:
+            return str(Path.home())
+        return ""
+
+    def _force_tool_detection(self, prompt_text: str, context_injected: bool = False):
+        """Detect tool intents in a plain-language prompt and return a LIST of
+        forced tool calls. Handles multiple intents in one prompt (e.g. list files
+        + fetch a website + get IP), so multi-part requests all execute."""
         import re
         lowered = prompt_text.lower()
         logger.info("[TOOL_TRACE] FORCE_CHECK prompt=%s", prompt_text[:200])
 
-        # Helper: check if any keyword from a group appears in the text
-        def _has_any(keywords):
-            return any(k in lowered for k in keywords)
-
-        # Helper: check if words appear near each other (within same sentence)
-        def _has_words_near(words):
-            for sentence in re.split(r'[.!?\n]', lowered):
+        def near(words):
+            for sentence in re.split(r'[.!?\n,;]', lowered):
                 if all(w in sentence for w in words):
                     return True
             return False
 
-        # Detect explicit file_explorer LIST requests
-        list_keywords = ("list files", "list directory", "show files", "show directory",
-                         "list current directory", "what files", "which files",
-                         "list all files", "list the files", "list python files",
-                         "show all files", "show me the files", "give me the files")
-        if _has_any(list_keywords) or _has_words_near(("list", "files")) or _has_words_near(("list", "directory")) or _has_words_near(("show", "files")) or _has_words_near(("show", "directory")):
-            path = "."
-            m = re.search(r'(?:in|under|from|at)\s+([\w\-/.\\:]+)', lowered)
-            if m:
-                candidate = m.group(1)
-                if candidate.lower() not in ("the", "a", "this", "that", "my", "your"):
-                    path = candidate
-            result = {"preset": "file_explorer", "args": {"action": "list", "path": path}, "raw": "[[forced]]"}
-            logger.info("[TOOL_TRACE] FORCE_MATCH=%s", result)
-            return result
+        calls = []
 
-        # Detect explicit file_explorer READ requests
-        read_keywords = ("read file", "show file", "file content", "contents of", "what is in", "open file")
-        if _has_any(read_keywords) or lowered.startswith("read ") or _has_words_near(("read", "file")) or _has_words_near(("show", "content")):
-            m = re.search(r'(?:file\s+)([\w\-/.\\]+\.\w+)', lowered)
-            if not m:
-                m = re.search(r'^read\s+([\w\-/.\\]+\.\w+)', lowered)
-            if not m:
-                m = re.search(r'(?:content of|contents of|in file|inside file)\s+([\w\-/.\\]+\.\w+)', lowered)
-            if m:
-                result = {"preset": "file_explorer", "args": {"action": "read", "path": m.group(1)}, "raw": "[[forced]]"}
-                logger.info("[TOOL_TRACE] FORCE_MATCH=%s", result)
-                return result
+        # 1. Web fetch — explicit domain/URL, or a known site name.
+        KNOWN_TLDS = ("com", "org", "net", "io", "gov", "edu", "news", "co", "ai")
+        url = None
+        for m in re.finditer(r'((?:https?://)?[a-z0-9][a-z0-9\-]*(?:\.[a-z0-9\-]+)+(?:/[^\s]*)?)', lowered):
+            cand = m.group(1)
+            host = cand.split("//")[-1].split("/")[0]
+            tld = host.rsplit(".", 1)[-1]
+            if tld in KNOWN_TLDS:
+                url = cand
+                break
+        if not url:
+            for site, dom in (("cnn", "cnn.com"), ("bbc", "bbc.com"), ("reuters", "reuters.com"),
+                              ("wikipedia", "wikipedia.org"), ("github", "github.com"), ("hacker news", "news.ycombinator.com")):
+                if site in lowered:
+                    url = dom
+                    break
+        if url:
+            calls.append({"preset": "web_fetch", "args": {"url": url}, "raw": "[[forced]]"})
 
-        # Detect explicit search_ripgrep requests
-        search_keywords = ("search for", "find function", "find code", "search code", "grep for", "search file")
-        if _has_any(search_keywords) or _has_words_near(("search", "for")) or _has_words_near(("find", "code")) or _has_words_near(("find", "function")):
-            query = re.sub(r'.*?(search for|find function|find code|search code|grep for)\s+', '', lowered).strip().split()[0]
-            # Try to extract a quoted query
-            qm = re.search(r'["\']([^"\']+)["\']', lowered)
-            if qm:
-                query = qm.group(1)
-            result = {"preset": "search_ripgrep", "args": {"query": query or "def", "path": "."}, "raw": "[[forced]]"}
-            logger.info("[TOOL_TRACE] FORCE_MATCH=%s", result)
-            return result
+        # 2. Network / IP address.
+        if "ip address" in lowered or "ipconfig" in lowered or near(("my", "ip")) or near(("public", "ip")) or near(("what", "ip")):
+            calls.append({"preset": "network_info", "args": {}, "raw": "[[forced]]"})
 
-        logger.info("[TOOL_TRACE] FORCE_MATCH=None")
-        return None
+        # 3. Read a specific file (works even when a listing was injected).
+        rm = re.search(r'(?:read|open|show|cat|contents? of|content of)\s+(?:the\s+)?(?:file\s+)?([\w\-./\\]+\.\w+)', lowered)
+        if rm and rm.group(1).rsplit(".", 1)[-1] not in KNOWN_TLDS:
+            calls.append({"preset": "file_explorer", "args": {"action": "read", "path": rm.group(1)}, "raw": "[[forced]]"})
+
+        # 4. List files — skip when the workspace listing was already injected.
+        if not context_injected:
+            list_kw = ("list files", "list directory", "show files", "what files", "which files",
+                       "list all files", "list the files", "show all files", "give me the files")
+            if any(k in lowered for k in list_kw) or near(("list", "files")) or near(("list", "directory")) or near(("show", "files")) or near(("all", "files")):
+                path = "."
+                m = re.search(r'(?:in|under|from|at)\s+([\w\-/.\\:]+)', lowered)
+                if m and m.group(1) not in ("the", "a", "this", "that", "my", "your"):
+                    path = m.group(1)
+                calls.append({"preset": "file_explorer", "args": {"action": "list", "path": path}, "raw": "[[forced]]"})
+
+        # 5. Search.
+        if near(("search", "for")) or near(("find", "code")) or near(("find", "function")) or "grep" in lowered:
+            qm = re.search(r'["\']([^"\']+)["\']', prompt_text)
+            query = qm.group(1) if qm else "def"
+            calls.append({"preset": "search_ripgrep", "args": {"query": query, "path": "."}, "raw": "[[forced]]"})
+
+        logger.info("[TOOL_TRACE] FORCE_MATCH presets=%s", [c["preset"] for c in calls])
+        return calls
 
     def _build_continuation_prompt(self, original_prompt: str, last_response: str, tool_results: list):
         import json
@@ -731,7 +784,12 @@ class RESTServer:
         for tr in tool_results:
             parts.append(f"\nTool: {tr['call']['preset']}")
             parts.append(f"Args: {json.dumps(tr['call']['args'])}")
-            parts.append(f"Result: {json.dumps(tr['result'])}")
+            # Cap each result so a big page/listing doesn't blow up the context
+            # and slow generation to the point of timing out.
+            result_json = json.dumps(tr['result'])
+            if len(result_json) > 2500:
+                result_json = result_json[:2500] + " …(truncated)"
+            parts.append(f"Result: {result_json}")
         parts.append("\n=== INSTRUCTION ===")
         parts.append("Using the TOOL EXECUTION RESULTS above, provide a direct answer to the ORIGINAL USER REQUEST.")
         parts.append("Do NOT describe what you would do. Do NOT explain the tools.")
