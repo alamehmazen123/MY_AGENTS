@@ -173,6 +173,10 @@ class RESTServer:
         async def pick_folder():
             return await self._pick_folder()
 
+        @self.app.post("/api/upload-paste")
+        async def upload_paste(req: Request):
+            return await self._upload_paste(req)
+
         @self.app.get("/api/core-instructions")
         async def core_instructions():
             return {"instructions": _load_core_instructions(), "applied": True}
@@ -271,6 +275,51 @@ class RESTServer:
                 return {"models": [], "error": f"HTTP {res.status_code}"}
         except Exception as e:
             return {"models": [], "error": str(e)}
+
+    async def _upload_paste(self, req: Request):
+        """Save a pasted blob (image/file) from the browser clipboard to disk
+        and return its absolute path so agents can reference it via tools."""
+        import base64
+        import re
+        import time
+        try:
+            body = await req.json()
+        except Exception as e:
+            return {"error": f"bad_json: {e}"}
+        name = (body.get("name") or "").strip() or f"pasted_{int(time.time())}.bin"
+        mime = body.get("mime") or "application/octet-stream"
+        data_b64 = body.get("data_base64") or ""
+        if not data_b64:
+            return {"error": "missing_data_base64"}
+        # Sanitise filename — keep extension, strip path separators.
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name)[-120:] or f"pasted_{int(time.time())}"
+        # If no extension and we know the mime, add a sensible one.
+        if "." not in safe:
+            ext = {
+                "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+                "image/webp": ".webp", "image/bmp": ".bmp",
+                "text/plain": ".txt", "application/pdf": ".pdf",
+            }.get(mime, ".bin")
+            safe = f"{safe}{ext}"
+        try:
+            raw = base64.b64decode(data_b64)
+        except Exception as e:
+            return {"error": f"bad_base64: {e}"}
+        out_dir = settings.data_dir / "pasted"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Add a short timestamp prefix so repeated pastes don't overwrite each other.
+        final_name = f"{int(time.time())}_{safe}"
+        out_path = out_dir / final_name
+        try:
+            out_path.write_bytes(raw)
+        except Exception as e:
+            return {"error": f"write_failed: {e}"}
+        return {
+            "name": final_name,
+            "path": str(out_path),
+            "size": len(raw),
+            "mime": mime,
+        }
 
     def _resolve_workspace(self, folder: str) -> str:
         """Normalize a user-supplied workspace folder to an absolute directory.

@@ -17,6 +17,38 @@ function readFileContent(file: File): Promise<string> {
   })
 }
 
+function fileToBase64(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = String(reader.result || '')
+      // Strip the "data:<mime>;base64," prefix the FileReader adds.
+      const idx = result.indexOf(',')
+      resolve(idx >= 0 ? result.slice(idx + 1) : result)
+    }
+    reader.onerror = () => reject(new Error('read_failed'))
+    reader.readAsDataURL(file)
+  })
+}
+
+// Upload a pasted blob to the backend; returns the absolute saved path so
+// the agent can reference the file via file_explorer / pdf_extract / etc.
+async function uploadPaste(blob: Blob, name: string): Promise<{ path: string; name: string; size: number } | null> {
+  try {
+    const data_base64 = await fileToBase64(blob)
+    const res = await fetch('/api/upload-paste', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, mime: blob.type, data_base64 }),
+    })
+    const json = await res.json()
+    if (json.error || !json.path) return null
+    return { path: json.path, name: json.name, size: json.size }
+  } catch {
+    return null
+  }
+}
+
 export function PromptBar() {
   const [text, setText] = useState('')
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
@@ -48,6 +80,56 @@ export function PromptBar() {
       newFiles.push({ name: file.name, content })
     }
     setAttachedFiles((prev) => [...prev, ...newFiles])
+  }
+
+  // Capture clipboard pastes: screenshots, images, files. Plain text falls
+  // through to the textarea's default paste behaviour.
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const cd = e.clipboardData
+    if (!cd) return
+
+    // Collect everything pasteable: files first, then inline items.
+    const blobs: { blob: Blob; name: string }[] = []
+    for (const f of Array.from(cd.files || [])) {
+      blobs.push({ blob: f, name: f.name || `paste_${Date.now()}` })
+    }
+    for (const item of Array.from(cd.items || [])) {
+      if (item.kind === 'file') {
+        const f = item.getAsFile()
+        if (f && !blobs.some((b) => b.blob === f)) {
+          const ext = (f.type.split('/')[1] || 'bin').split('+')[0]
+          const fallback = `screenshot_${Date.now()}.${ext}`
+          blobs.push({ blob: f, name: f.name || fallback })
+        }
+      }
+    }
+    if (blobs.length === 0) return  // nothing pasteable → let text paste happen
+    e.preventDefault()
+
+    const additions: AttachedFile[] = []
+    for (const { blob, name } of blobs) {
+      const isImage = blob.type.startsWith('image/')
+      const saved = await uploadPaste(blob, name)
+      if (saved) {
+        const label = isImage
+          ? `[Pasted image saved to ${saved.path} (${saved.size} bytes, ${blob.type}). ` +
+            `Use file_explorer or other tools to reference it. ` +
+            `Text-only models can't "see" image pixels; use a vision model for visual Q&A.]`
+          : `[Pasted file saved to ${saved.path} (${saved.size} bytes, ${blob.type || 'unknown'})]`
+        additions.push({ name: saved.name, content: label })
+      } else if (!isImage) {
+        // Fall back to reading the text directly for non-image pastes.
+        try {
+          const text = await blob.text()
+          additions.push({ name, content: text })
+        } catch {
+          additions.push({ name, content: `[Could not read pasted ${name}]` })
+        }
+      } else {
+        additions.push({ name, content: `[Failed to save pasted image ${name}]` })
+      }
+    }
+    if (additions.length > 0) setAttachedFiles((prev) => [...prev, ...additions])
   }
 
   const applyFolder = () => {
@@ -171,13 +253,14 @@ export function PromptBar() {
           rows={2}
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onPaste={handlePaste}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
               if (!isGenerating) handleSend()
             }
           }}
-          placeholder={isGenerating ? 'Generating...' : 'Type your prompt...'}
+          placeholder={isGenerating ? 'Generating...' : 'Type your prompt — paste images/files with Ctrl+V or right-click → Paste'}
         />
         <button
           type="button"
