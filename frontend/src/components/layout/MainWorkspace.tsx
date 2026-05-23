@@ -17,7 +17,6 @@ function shortArgs(args: any): string {
 
 export function MainWorkspace() {
   const session = useSessionStore((s) => s.sessions.find((x) => x.id === s.activeSessionId))
-  const winner = session?.winner
   const executionResult = session?.executionResult
   const unloadStatus = useSessionStore((s) => s.unloadStatus)
   const isGenerating = useSessionStore((s) => s.isGenerating)
@@ -30,12 +29,9 @@ export function MainWorkspace() {
   return (
     <main className="flex-1 flex flex-col overflow-hidden">
       {/* Top action bar */}
-      {(winner || canRevise || unloadStatus) && (
+      {(canRevise || unloadStatus) && (
         <div className="px-3 py-2 bg-gray-800/80 border-b border-gray-700 flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-2 flex-wrap">
-            {winner && (
-              <span className="text-green-300 text-sm font-medium">⭐ Winner: Agent-{winner}</span>
-            )}
             {canRevise && (
               <button
                 onClick={reviseAgain}

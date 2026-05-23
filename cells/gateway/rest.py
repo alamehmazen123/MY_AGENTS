@@ -667,6 +667,21 @@ class RESTServer:
                         any_tool_executed = True
 
                     all_tool_results.extend(tool_results)
+
+                    # Fast path: if every tool succeeded, synthesize a short
+                    # deterministic summary and skip another model round. This
+                    # prevents big-model continuation generations from timing
+                    # out (an 8B/14B model can take >5min to summarize on CPU)
+                    # and gives the user immediate confirmation of the action.
+                    all_ok = all(
+                        isinstance(r["result"], dict) and not r["result"].get("error")
+                        for r in tool_results
+                    )
+                    if all_ok:
+                        final_response = self._summarize_tool_success(tool_results)
+                        logger.info("[TOOL_TRACE] stage=F fast_path_summary len=%s", len(final_response))
+                        break
+
                     current_prompt = self._build_continuation_prompt(base_prompt, response_text, tool_results)
                     logger.info("stage=F context_after_tool prompt_len=%s", len(current_prompt))
                     # After first turn, simplify system prompt
@@ -719,6 +734,14 @@ class RESTServer:
             "model": model,
             "done": True,
             "tool_context": tool_context,
+            "tool_results": [
+                {
+                    "tool": tr["call"]["preset"],
+                    "args": tr["call"].get("args", {}),
+                    "result": tr["result"],
+                }
+                for tr in all_tool_results
+            ],
         }
 
     async def _unload_model_quiet(self, model: str):
@@ -735,6 +758,44 @@ class RESTServer:
                 )
         except Exception:
             pass
+
+    def _summarize_tool_success(self, tool_results: list) -> str:
+        """Build a short deterministic summary from successful tool results so
+        we can short-circuit the slow follow-up model generation."""
+        lines = ["**Done.**"]
+        for tr in tool_results:
+            preset = tr["call"]["preset"]
+            args = tr["call"].get("args", {})
+            res = tr["result"]
+            if preset == "file_explorer":
+                act = args.get("action", "")
+                p = res.get("path", args.get("path", ""))
+                if act == "write":
+                    lines.append(f"- Wrote `{p}` ({res.get('bytes_written', '?')} bytes).")
+                elif act == "read":
+                    n = len(res.get("content", "") or "")
+                    lines.append(f"- Read `{p}` ({n} chars).")
+                elif act == "list":
+                    lines.append(f"- Listed `{p}` — {len(res.get('items', []))} items.")
+                elif act == "delete":
+                    lines.append(f"- Deleted `{p}`.")
+                elif act == "mkdir":
+                    lines.append(f"- Created folder `{p}`.")
+                else:
+                    lines.append(f"- file_explorer/{act} on `{p}` ok.")
+            elif preset == "web_fetch":
+                lines.append(f"- Fetched `{res.get('url', args.get('url'))}` — {res.get('text_length', 0)} chars; {len(res.get('headlines', []))} headlines.")
+            elif preset == "network_info":
+                lines.append(f"- IP: local={res.get('local_ip')}, public={res.get('public_ip')}.")
+            elif preset == "python_exec":
+                out = (res.get("stdout") or "").strip()
+                lines.append(f"- Ran Python — stdout: `{out[:120]}`" if out else "- Ran Python (no stdout).")
+            elif preset == "search_ripgrep":
+                lines.append(f"- Search returned {len(res.get('matches', []))} matches.")
+            else:
+                preview = json.dumps(res)[:160]
+                lines.append(f"- `{preset}` ok — {preview}")
+        return "\n".join(lines)
 
     def _parse_args_block(self, block: str):
         """Parse the {...} body of a [[MCP:...]] call. Tries strict JSON first,

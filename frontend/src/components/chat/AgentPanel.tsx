@@ -6,7 +6,6 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
   const activeId = useSessionStore((s) => s.activeSessionId)
   const session = useSessionStore((s) => s.sessions.find((x) => x.id === activeId))
   const settingsModel = useSettingsStore((s) => (agent === 'A' ? s.agentAModel : s.agentBModel))
-  const selectWinner = useSessionStore((s) => s.selectWinner)
   const executeAgent = useSessionStore((s) => s.executeAgent)
   const isGenerating = useSessionStore((s) => s.isGenerating)
 
@@ -14,9 +13,6 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
   const messages = agentState?.messages ?? []
   const status = agentState?.status ?? 'online'
   const model = agentState?.model || settingsModel
-  const winner = session?.winner
-  const isWinner = winner === agent
-  const bothDone = session?.agentA.status === 'online' && (session?.agentB.status === 'online' || session?.agentB.status === 'disabled')
   const hasAgentResponse = messages.some((m) => m.role === 'agent')
 
   const bgColor = agent === 'A' ? 'bg-purple-50' : 'bg-orange-50'
@@ -47,7 +43,7 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
             : status
 
   return (
-    <div className={`flex-1 flex flex-col rounded-lg border overflow-hidden ${bgColor} ${textColor} ${isWinner ? 'ring-2 ring-green-500 border-green-400' : 'border-gray-200'}`}>
+    <div className={`flex-1 flex flex-col rounded-lg border overflow-hidden ${bgColor} ${textColor} border-gray-200`}>
       <div className={`px-3 py-2 border-b border-gray-200 flex items-center justify-between ${headerBg}`}>
         <div>
           <div className="font-bold text-sm">{label}</div>
@@ -75,26 +71,14 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
           <MessageBubble key={msg.id} role={msg.role} text={msg.text} streaming={msg.streaming} />
         ))}
         {hasAgentResponse && !isGenerating && (
-          <div className="flex justify-center gap-2 pt-2 flex-wrap">
+          <div className="flex justify-center pt-2">
             <button
               onClick={() => executeAgent(agent)}
               className="px-3 py-1.5 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors"
-              title="Run any tool calls from this agent's plan"
+              title="Generate executable tool calls and run them to fulfil the original request"
             >
               ▶ Execute Plan
             </button>
-            {bothDone && (
-              <button
-                onClick={() => selectWinner(agent)}
-                className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-                  isWinner
-                    ? 'bg-green-600 text-white hover:bg-green-500'
-                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                }`}
-              >
-                {isWinner ? '⭐ Winner Selected' : 'Select as Winner'}
-              </button>
-            )}
           </div>
         )}
       </div>

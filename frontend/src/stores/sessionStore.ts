@@ -86,7 +86,7 @@ async function callOllama(
     contextLength?: number
     signal?: AbortSignal
   }
-): Promise<{ text: string; toolContext: string }> {
+): Promise<{ text: string; toolContext: string; toolResults: any[] }> {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), 340_000)
 
@@ -139,18 +139,22 @@ async function callOllama(
     }
     const data = await res.json()
     if (data.error) {
-      return { text: `[Error: ${data.error}] ${data.output || ''}`, toolContext: '' }
+      return { text: `[Error: ${data.error}] ${data.output || ''}`, toolContext: '', toolResults: [] }
     }
-    return { text: data.output || '[No response from model]', toolContext: data.tool_context || '' }
+    return {
+      text: data.output || '[No response from model]',
+      toolContext: data.tool_context || '',
+      toolResults: data.tool_results || [],
+    }
   } catch (e: any) {
     clearTimeout(timeoutId)
     if (e.name === 'AbortError') {
       if (opts?.signal?.aborted) {
-        return { text: '[Stopped by user]', toolContext: '' }
+        return { text: '[Stopped by user]', toolContext: '', toolResults: [] }
       }
-      return { text: '[Error: Request timed out. The model may be overloaded or Ollama is not responding.]', toolContext: '' }
+      return { text: '[Error: Request timed out. The model may be overloaded or Ollama is not responding.]', toolContext: '', toolResults: [] }
     }
-    return { text: `[Error: ${e.message}]`, toolContext: '' }
+    return { text: `[Error: ${e.message}]`, toolContext: '', toolResults: [] }
   }
 }
 
@@ -341,44 +345,40 @@ export const useSessionStore = create<SessionState>((set, get) => {
       const state = get()
       const session = state.sessions.find((s) => s.id === state.activeSessionId)
       if (!session) return
+      const settings = useSettingsStore.getState()
 
       const target = agent === 'A' ? session.agentA : session.agentB
       const other = agent === 'A' ? session.agentB : session.agentA
       const targetMsg = target.messages.filter((m) => m.role === 'agent').pop()
       const otherMsg = other.messages.filter((m) => m.role === 'agent').pop()
+      const userMsg = session.agentA.messages.filter((m) => m.role === 'user').pop()
+      const originalRequest = userMsg?.text || ''
       if (!targetMsg && !otherMsg) return
 
-      // Fall back to the other agent's text if the chosen one has no tool calls
-      // (the reviewer typically writes prose; endorsing it endorses A's plan).
-      const plan = [targetMsg?.text, otherMsg?.text].filter(Boolean).join('\n\n')
-
-      set({ isGenerating: true, unloadStatus: `Executing Agent-${agent} plan...` })
-      try {
-        const res = await fetch('/api/execute-plan', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ plan, workspace_folder: session.workspaceFolder }),
-        })
-        const data = await res.json()
-        const steps: ExecutionStep[] = (data.results || []).map((r: any) => {
-          const err = r.result?.error || r.result?.status === 'error'
+      const toSteps = (raw: any[]): ExecutionStep[] =>
+        (raw || []).map((r: any) => {
+          const res = r.result ?? r
+          const err = res?.error || res?.status === 'error'
           return {
             tool: r.tool,
             args: r.args,
-            result: r.result,
+            result: res,
             ok: !err,
-            preview: typeof r.result === 'string' ? r.result.slice(0, 300) : JSON.stringify(r.result).slice(0, 300),
+            preview: typeof res === 'string' ? res.slice(0, 300) : JSON.stringify(res).slice(0, 300),
           }
         })
+      const buildSummary = (steps: ExecutionStep[], status: string, errMsg?: string): string => {
         const okCount = steps.filter((s) => s.ok).length
         const failed = steps.length - okCount
-        const summary =
-          data.status === 'executed'
-            ? `✅ ${okCount} tool call${okCount === 1 ? '' : 's'} executed successfully${failed ? `, ${failed} failed` : ''}.`
-            : data.status === 'no_tools_found'
-              ? `⚠️ No executable tool calls found in either agent's answer — nothing to run.`
-              : `⚠️ ${data.status}${data.error ? ': ' + data.error : ''}`
-        const result: ExecutionResult = { agent, steps, summary }
+        if (steps.length > 0) {
+          return `✅ ${okCount} tool call${okCount === 1 ? '' : 's'} executed successfully${failed ? `, ${failed} failed` : ''}.`
+        }
+        return status === 'no_tools_found'
+          ? `⚠️ No executable tool calls found — nothing to run.`
+          : `⚠️ ${status}${errMsg ? ': ' + errMsg : ''}`
+      }
+
+      const setResult = (result: ExecutionResult) =>
         set((s) => ({
           isGenerating: false,
           unloadStatus: '',
@@ -386,16 +386,68 @@ export const useSessionStore = create<SessionState>((set, get) => {
             sess.id === s.activeSessionId ? { ...sess, executionResult: result } : sess
           ),
         }))
-      } catch (e: any) {
-        set({
-          isGenerating: false,
-          unloadStatus: '',
-          sessions: get().sessions.map((sess) =>
-            sess.id === get().activeSessionId
-              ? { ...sess, executionResult: { agent, steps: [], summary: `⚠️ Execution failed: ${e.message}` } }
-              : sess
-          ),
+
+      set({ isGenerating: true, unloadStatus: `Executing Agent-${agent} plan...` })
+
+      try {
+        // ── PASS 1: passive extraction from the existing texts. ──
+        const plan = [targetMsg?.text, otherMsg?.text].filter(Boolean).join('\n\n')
+        const res = await fetch('/api/execute-plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plan, workspace_folder: session.workspaceFolder }),
         })
+        const data = await res.json()
+        let steps = toSteps(data.results || [])
+
+        // ── PASS 2: if nothing to run, ASK the agent to actually do the work. ──
+        if (steps.length === 0) {
+          set({ unloadStatus: `Asking Agent-${agent} to generate an executable plan...` })
+          const model = agent === 'A' ? settings.agentAModel : settings.agentBModel
+          const seedAnswer = targetMsg?.text || otherMsg?.text || ''
+          const execPrompt =
+            `ORIGINAL USER REQUEST:\n"""${originalRequest}"""\n\n` +
+            `LATEST AGENT ANSWER (for context):\n"""${truncate(seedAnswer, 2000)}"""\n\n` +
+            `Now ACTUALLY perform the user's request using MCP tools. Emit one or more ` +
+            `\`[[MCP:tool:{json}]]\` calls so the work really happens (e.g. file_explorer ` +
+            `write to create a file at the requested path; use absolute paths). ` +
+            `Workspace folder: ${session.workspaceFolder || '(project root)'}. ` +
+            `Do NOT just narrate — the tool calls will be executed.`
+          const execSystem =
+            'You are an execution agent. Carry out the user task by emitting [[MCP:...]] ' +
+            'tool calls that actually run. Output ONLY tool calls and minimal narration.'
+          const r = await callOllama(execPrompt, model, execSystem, {
+            workspaceFolder: session.workspaceFolder,
+            enableTools: true,
+            temperature: 0.1,
+            contextLength: settings.contextLength,
+          })
+          // Backend already executed any tool calls during this /api/prompt round.
+          steps = toSteps(
+            r.toolResults.map((tr: any) => ({ tool: tr.tool, args: tr.args, result: tr.result }))
+          )
+          // Append the agent's response to its panel so the user sees what it did.
+          set((s) => ({
+            sessions: s.sessions.map((sess) =>
+              sess.id === s.activeSessionId
+                ? {
+                    ...sess,
+                    [agent === 'A' ? 'agentA' : 'agentB']: {
+                      ...(agent === 'A' ? sess.agentA : sess.agentB),
+                      messages: [
+                        ...(agent === 'A' ? sess.agentA : sess.agentB).messages,
+                        { id: makeId(), role: 'agent', text: r.text, timestamp: Date.now() },
+                      ],
+                    },
+                  }
+                : sess
+            ),
+          }))
+        }
+
+        setResult({ agent, steps, summary: buildSummary(steps, data.status, data.error) })
+      } catch (e: any) {
+        setResult({ agent, steps: [], summary: `⚠️ Execution failed: ${e.message}` })
       }
     },
 
