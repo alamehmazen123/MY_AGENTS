@@ -20,6 +20,20 @@ export interface AttachedFile {
   content: string
 }
 
+export interface ExecutionStep {
+  tool: string
+  args: any
+  result: any
+  ok: boolean
+  preview: string
+}
+
+export interface ExecutionResult {
+  agent: 'A' | 'B'
+  steps: ExecutionStep[]
+  summary: string
+}
+
 export interface Session {
   id: string
   name: string
@@ -30,7 +44,7 @@ export interface Session {
   attachedFiles: AttachedFile[]
   workspaceFolder: string
   winner: 'A' | 'B' | null
-  executionResult: string | null
+  executionResult: ExecutionResult | null
 }
 
 export interface SessionState {
@@ -41,6 +55,8 @@ export interface SessionState {
   sendPrompt: (text: string, opts?: { files?: AttachedFile[]; folder?: string }) => void
   abortGeneration: () => void
   selectWinner: (agent: 'A' | 'B') => void
+  executeAgent: (agent: 'A' | 'B') => Promise<void>
+  reviseAgain: () => Promise<void>
   executeWinner: () => Promise<void>
   createSession: () => void
   switchSession: (id: string) => void
@@ -212,6 +228,7 @@ function loadSessions(): { sessions: Session[]; activeSessionId: string } | null
     // Restore sessions but reset any transient "in-flight" runtime state.
     const sessions: Session[] = parsed.sessions.map((s: any) => ({
       ...s,
+      executionResult: null,  // transient; format may have changed
       agentA: {
         ...s.agentA,
         status: 'online',
@@ -307,33 +324,177 @@ export const useSessionStore = create<SessionState>((set, get) => {
       }))
     },
 
-    executeWinner: async () => {
+    executeAgent: async (agent: 'A' | 'B') => {
       const state = get()
       const session = state.sessions.find((s) => s.id === state.activeSessionId)
-      if (!session || !session.winner) return
+      if (!session) return
 
-      const winnerAgent = session.winner === 'A' ? session.agentA : session.agentB
-      const winnerMsg = winnerAgent.messages
-        .filter((m) => m.role === 'agent')
-        .pop()
+      const target = agent === 'A' ? session.agentA : session.agentB
+      const other = agent === 'A' ? session.agentB : session.agentA
+      const targetMsg = target.messages.filter((m) => m.role === 'agent').pop()
+      const otherMsg = other.messages.filter((m) => m.role === 'agent').pop()
+      if (!targetMsg && !otherMsg) return
 
-      if (!winnerMsg) return
+      // Fall back to the other agent's text if the chosen one has no tool calls
+      // (the reviewer typically writes prose; endorsing it endorses A's plan).
+      const plan = [targetMsg?.text, otherMsg?.text].filter(Boolean).join('\n\n')
 
-      set({ isGenerating: true, unloadStatus: 'Executing winner plan...' })
-
+      set({ isGenerating: true, unloadStatus: `Executing Agent-${agent} plan...` })
       try {
         const res = await fetch('/api/execute-plan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            plan: winnerMsg.text,
-            workspace_folder: session.workspaceFolder,
-          }),
+          body: JSON.stringify({ plan, workspace_folder: session.workspaceFolder }),
         })
         const data = await res.json()
-        const resultText = data.status === 'executed'
-          ? `✅ Executed ${data.results?.length || 0} tool(s)\n` + data.results.map((r: any) => `${r.tool}: ${JSON.stringify(r.result).slice(0, 200)}`).join('\n')
-          : `⚠️ ${data.status}\n${data.plan || data.error || ''}`
+        const steps: ExecutionStep[] = (data.results || []).map((r: any) => {
+          const err = r.result?.error || r.result?.status === 'error'
+          return {
+            tool: r.tool,
+            args: r.args,
+            result: r.result,
+            ok: !err,
+            preview: typeof r.result === 'string' ? r.result.slice(0, 300) : JSON.stringify(r.result).slice(0, 300),
+          }
+        })
+        const okCount = steps.filter((s) => s.ok).length
+        const failed = steps.length - okCount
+        const summary =
+          data.status === 'executed'
+            ? `✅ ${okCount} tool call${okCount === 1 ? '' : 's'} executed successfully${failed ? `, ${failed} failed` : ''}.`
+            : data.status === 'no_tools_found'
+              ? `⚠️ No executable tool calls found in either agent's answer — nothing to run.`
+              : `⚠️ ${data.status}${data.error ? ': ' + data.error : ''}`
+        const result: ExecutionResult = { agent, steps, summary }
+        set((s) => ({
+          isGenerating: false,
+          unloadStatus: '',
+          sessions: s.sessions.map((sess) =>
+            sess.id === s.activeSessionId ? { ...sess, executionResult: result } : sess
+          ),
+        }))
+      } catch (e: any) {
+        set({
+          isGenerating: false,
+          unloadStatus: '',
+          sessions: get().sessions.map((sess) =>
+            sess.id === get().activeSessionId
+              ? { ...sess, executionResult: { agent, steps: [], summary: `⚠️ Execution failed: ${e.message}` } }
+              : sess
+          ),
+        })
+      }
+    },
+
+    executeWinner: async () => {
+      const session = get().sessions.find((s) => s.id === get().activeSessionId)
+      if (!session || !session.winner) return
+      await get().executeAgent(session.winner)
+    },
+
+    reviseAgain: async () => {
+      const state = get()
+      const session = state.sessions.find((s) => s.id === state.activeSessionId)
+      if (!session) return
+      const settings = useSettingsStore.getState()
+      const isBEnabled = !!settings.agentBModel && settings.preset !== 'CHAT'
+
+      // Use the most recent agent response as the seed for the revision. If
+      // Agent-B has spoken, use B; otherwise the most recent A message.
+      const lastB = session.agentB.messages.filter((m) => m.role === 'agent').pop()
+      const lastA = session.agentA.messages.filter((m) => m.role === 'agent').pop()
+      const seed = (lastB?.text || lastA?.text || '').trim()
+      if (!seed) return
+
+      const abortCtrl = new AbortController()
+      currentAbortController = abortCtrl
+      const isAborted = () => abortCtrl.signal.aborted
+
+      set((s) => ({
+        isGenerating: true,
+        unloadStatus: 'Revising — Agent-A...',
+        sessions: s.sessions.map((sess) =>
+          sess.id === s.activeSessionId
+            ? {
+                ...sess,
+                winner: null,
+                executionResult: null,
+                agentA: { ...sess.agentA, status: 'working' },
+                agentB: { ...sess.agentB, status: isBEnabled ? 'waiting' : sess.agentB.status },
+              }
+            : sess
+        ),
+      }))
+
+      try {
+        // ── Phase 1: Agent-A revises whatever came last ──
+        const revisePromptA =
+          `A previous answer is shown below. Build a BETTER answer/plan by improving on it.\n` +
+          `If the request needs tools, emit [[MCP:tool:{json}]] calls. Never invent data.\n\n` +
+          `=== PREVIOUS ANSWER ===\n${truncate(seed, 4000)}\n=== END ===\n\n` +
+          `Now produce your improved version.`
+        const aResult = await callOllama(revisePromptA, settings.agentAModel, settings.systemPromptA, {
+          workspaceFolder: session.workspaceFolder,
+          enableTools: settings.preset !== 'CHAT',
+          temperature: settings.temperatureA,
+          contextLength: settings.contextLength,
+          signal: abortCtrl.signal,
+        })
+        if (isAborted() || aResult.text === '[Stopped by user]') {
+          set({ isGenerating: false, unloadStatus: '' })
+          return
+        }
+        const newA = aResult.text
+        const toolCtxA = aResult.toolContext
+
+        set((s) => ({
+          sessions: s.sessions.map((sess) =>
+            sess.id === s.activeSessionId
+              ? {
+                  ...sess,
+                  agentA: {
+                    ...sess.agentA,
+                    status: 'online',
+                    messages: [
+                      ...sess.agentA.messages,
+                      { id: makeId(), role: 'agent', text: newA, timestamp: Date.now() },
+                    ],
+                  },
+                  agentB: { ...sess.agentB, status: isBEnabled ? 'working' : sess.agentB.status },
+                }
+              : sess
+          ),
+          unloadStatus: 'Revising — Agent-B...',
+        }))
+
+        if (!isBEnabled) {
+          set({ isGenerating: false, unloadStatus: '' })
+          return
+        }
+
+        // ── Phase 2: Agent-B reviews A's NEW answer ──
+        const groundTruth = toolCtxA
+          ? `\nACTUAL TOOL RESULTS (ground truth):\n${truncate(toolCtxA, 3000)}\n`
+          : ''
+        const reviewPromptB =
+          `Agent-A produced this revised answer:\n"""${truncate(newA, 4000)}"""\n${groundTruth}\n` +
+          `Produce an even better final answer. Correct any mistakes using the actual tool results ` +
+          `above. CRITICAL: never invent data (file names, headlines, IPs, numbers). Do NOT write ` +
+          `code or describe steps; the tools already ran. Be concise.`
+        const reviewSystem =
+          'You are a fact-checking reviewer. You verify and improve an answer using the real ' +
+          'tool results provided. You never fabricate data and never write code.'
+        const bResult = await callOllama(reviewPromptB, settings.agentBModel, reviewSystem, {
+          enableTools: false,
+          temperature: settings.temperatureB,
+          contextLength: settings.contextLength,
+          signal: abortCtrl.signal,
+        })
+
+        if (isAborted() || bResult.text === '[Stopped by user]') {
+          set({ isGenerating: false, unloadStatus: '' })
+          return
+        }
 
         set((s) => ({
           isGenerating: false,
@@ -342,15 +503,21 @@ export const useSessionStore = create<SessionState>((set, get) => {
             sess.id === s.activeSessionId
               ? {
                   ...sess,
-                  executionResult: resultText,
-                  agentA: { ...sess.agentA, status: 'online' },
-                  agentB: { ...sess.agentB, status: sess.agentB.status === 'working' ? 'waiting' : sess.agentB.status },
+                  agentB: {
+                    ...sess.agentB,
+                    status: 'online',
+                    messages: [
+                      ...sess.agentB.messages,
+                      { id: makeId(), role: 'agent', text: bResult.text, timestamp: Date.now() },
+                    ],
+                  },
                 }
               : sess
           ),
         }))
-      } catch (e: any) {
-        set({ isGenerating: false, unloadStatus: `[Error: ${e.message}]` })
+      } finally {
+        currentAbortController = null
+        set({ isGenerating: false })
       }
     },
 

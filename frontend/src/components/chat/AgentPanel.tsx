@@ -7,6 +7,7 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
   const session = useSessionStore((s) => s.sessions.find((x) => x.id === activeId))
   const settingsModel = useSettingsStore((s) => (agent === 'A' ? s.agentAModel : s.agentBModel))
   const selectWinner = useSessionStore((s) => s.selectWinner)
+  const executeAgent = useSessionStore((s) => s.executeAgent)
   const isGenerating = useSessionStore((s) => s.isGenerating)
 
   const agentState = agent === 'A' ? session?.agentA : session?.agentB
@@ -73,18 +74,27 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
         {messages.map((msg) => (
           <MessageBubble key={msg.id} role={msg.role} text={msg.text} streaming={msg.streaming} />
         ))}
-        {bothDone && hasAgentResponse && !isGenerating && (
-          <div className="flex justify-center pt-2">
+        {hasAgentResponse && !isGenerating && (
+          <div className="flex justify-center gap-2 pt-2 flex-wrap">
             <button
-              onClick={() => selectWinner(agent)}
-              className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-                isWinner
-                  ? 'bg-green-600 text-white hover:bg-green-500'
-                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-              }`}
+              onClick={() => executeAgent(agent)}
+              className="px-3 py-1.5 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors"
+              title="Run any tool calls from this agent's plan"
             >
-              {isWinner ? '⭐ Winner Selected' : 'Select as Winner'}
+              ▶ Execute Plan
             </button>
+            {bothDone && (
+              <button
+                onClick={() => selectWinner(agent)}
+                className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+                  isWinner
+                    ? 'bg-green-600 text-white hover:bg-green-500'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                {isWinner ? '⭐ Winner Selected' : 'Select as Winner'}
+              </button>
+            )}
           </div>
         )}
       </div>
