@@ -564,7 +564,7 @@ class RESTServer:
                 if len(current_prompt) > MAX_PROMPT_LEN:
                     current_prompt = current_prompt[:MAX_PROMPT_LEN] + "\n\n[...truncated by backend]"
 
-                async with httpx.AsyncClient(timeout=240) as client:
+                async with httpx.AsyncClient(timeout=300) as client:
                     payload = {
                         "model": model,
                         "prompt": current_prompt,
@@ -607,7 +607,7 @@ class RESTServer:
                     res = await client.post(
                         f"{settings.ollama_host}/api/generate",
                         json=payload,
-                        timeout=240,
+                        timeout=300,
                     )
                     if res.status_code != 200:
                         logger.info("stage=G ollama_error status=%s", res.status_code)
@@ -684,7 +684,7 @@ class RESTServer:
             return {
                 "error": "ollama_timeout",
                 "output": (
-                    f"[Error: '{model}' did not respond within 240s. "
+                    f"[Error: '{model}' did not respond within 300s. "
                     "It may be cold-loading a large model or generating too much. "
                     "Try a smaller model or a simpler prompt.]"
                 ),
@@ -736,29 +736,45 @@ class RESTServer:
         except Exception:
             pass
 
+    def _parse_args_block(self, block: str):
+        """Parse the {...} body of a [[MCP:...]] call. Tries strict JSON first,
+        then Python-literal parsing (handles triple-quoted strings, single
+        quotes, trailing commas — common LLM JSON mistakes)."""
+        import json
+        import ast
+        try:
+            return json.loads(block)
+        except Exception:
+            pass
+        try:
+            # ast.literal_eval accepts Python dict literals, which permit
+            # \"\"\"multi-line\"\"\" content and 'single quotes' that JSON forbids.
+            value = ast.literal_eval(block)
+            if isinstance(value, dict):
+                return value
+        except Exception:
+            pass
+        return None
+
     def _extract_tool_calls(self, text: str):
         import re
-        import json
         # Primary: single-line or multi-line JSON inside [[MCP:preset:{...}]]
         pattern = re.compile(r'\[\[MCP:(\w+):\s*({.*?)\s*\]\]', re.DOTALL)
         calls = []
         for match in pattern.finditer(text):
             preset = match.group(1)
-            try:
-                args = json.loads(match.group(2))
+            args = self._parse_args_block(match.group(2))
+            if args is not None:
                 calls.append({"preset": preset, "args": args, "raw": match.group(0)})
-            except json.JSONDecodeError:
-                continue
         if not calls:
             # Fallback: match inside markdown code blocks that contain [[MCP:...]]
             md_pattern = re.compile(r'```.*?\n(.*?)\n```', re.DOTALL)
             for md_match in md_pattern.finditer(text):
                 inner = md_match.group(1)
                 for m in re.finditer(r'\[\[MCP:(\w+):\s*({.*?)\s*\]\]', inner, re.DOTALL):
-                    try:
-                        calls.append({"preset": m.group(1), "args": json.loads(m.group(2)), "raw": m.group(0)})
-                    except json.JSONDecodeError:
-                        continue
+                    args = self._parse_args_block(m.group(2))
+                    if args is not None:
+                        calls.append({"preset": m.group(1), "args": args, "raw": m.group(0)})
         return calls
 
     def _infer_workspace_from_prompt(self, prompt_text: str) -> str:

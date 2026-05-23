@@ -72,7 +72,7 @@ async function callOllama(
   }
 ): Promise<{ text: string; toolContext: string }> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 280_000)
+  const timeoutId = setTimeout(() => controller.abort(), 340_000)
 
   if (opts?.signal) {
     const onAbort = () => {

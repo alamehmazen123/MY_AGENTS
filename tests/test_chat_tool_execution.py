@@ -147,6 +147,29 @@ async def test_prompt_search_code_forces_tool(monkeypatch):
         f"Expected search_ripgrep invocation, got {mcp.invocations}"
 
 
+def test_extract_tool_calls_tolerates_python_triple_quotes():
+    """Regression: the model often writes content with Python triple-quotes,
+    which is invalid JSON. The extractor must still recover it."""
+    server = make_server(FakeMCPCell())
+    text = (
+        '[[MCP:file_explorer:{"action":"write","path":"x.py",'
+        '"content":"""def f():\n    return 1\n"""}]]'
+    )
+    calls = server._extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0]["preset"] == "file_explorer"
+    assert calls[0]["args"]["action"] == "write"
+    assert "def f()" in calls[0]["args"]["content"]
+
+
+def test_extract_tool_calls_tolerates_single_quotes():
+    server = make_server(FakeMCPCell())
+    text = "[[MCP:file_explorer:{'action':'list','path':'.'}]]"
+    calls = server._extract_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0]["args"]["action"] == "list"
+
+
 @pytest.mark.asyncio
 async def test_extract_tool_calls_multiline_json():
     """Test that _extract_tool_calls handles multi-line JSON."""
