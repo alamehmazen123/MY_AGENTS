@@ -108,6 +108,19 @@ async function callOllama(
 
     const settings = useSettingsStore.getState()
     body.preset = settings.preset
+
+    // Force structured markdown output for every preset EXCEPT plain CHAT — so
+    // answers come back as bullet points, headings, and fenced code blocks
+    // (which the UI then renders as a real Python/code box with a copy button).
+    if (settings.preset !== 'CHAT' && body.system) {
+      body.system =
+        body.system +
+        '\n\nFORMATTING: Respond in markdown. Use short bullet points for any list. ' +
+        'Use ## headings for distinct sections when useful. Put ALL code inside fenced ' +
+        'code blocks with a language tag (e.g. ```python ... ```) — never paste raw code ' +
+        'into prose. Be structured; do not write a wall of plain text.'
+    }
+
     console.log(
       '[SESSION_STORE_TRACE] sending /api/prompt body=',
       JSON.stringify({ preset: body.preset, model: body.model, no_tools: body.no_tools, enableTools: opts?.enableTools, system_len: body.system?.length, prompt_preview: body.prompt?.slice(0, 80) })
