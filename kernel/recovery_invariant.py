@@ -14,6 +14,16 @@ from kernel.universe import StateUniverse, StateSnapshot
 from kernel.events import EventBus
 
 
+@dataclass
+class SelfTestResult:
+    """Detailed result from a self-test run."""
+    passed: bool
+    failed_test: Optional[str] = None
+    failed_cell: Optional[str] = None
+    reason: Optional[str] = None
+    exception: Optional[BaseException] = None
+
+
 RECOVERY_SPEC = {
     "max_recovery_time_ms": 5000,
     "max_data_loss_events": 0,
@@ -95,10 +105,29 @@ class RecoveryEngine:
         # No snapshot: empty state
         return StateSnapshot(timestamp=datetime.utcnow(), data={}, checksum="0" * 16)
     
-    async def self_test(self) -> bool:
-        """Periodic self-test every 60s."""
-        # Verify chain integrity
-        return self.bus.verify_chain()
+    async def self_test(self) -> SelfTestResult:
+        """Periodic self-test every 60s.
+        
+        Returns a SelfTestResult with detailed diagnostics on failure.
+        """
+        try:
+            ok = self.bus.verify_chain()
+            if ok:
+                return SelfTestResult(passed=True)
+            return SelfTestResult(
+                passed=False,
+                failed_test="chain_integrity",
+                failed_cell="event_bus",
+                reason="Event chain SHA-256 verification failed — log may be corrupt or truncated",
+            )
+        except Exception as e:
+            return SelfTestResult(
+                passed=False,
+                failed_test="chain_integrity",
+                failed_cell="event_bus",
+                reason=f"Exception during self-test: {e}",
+                exception=e,
+            )
 
 
 # Factory

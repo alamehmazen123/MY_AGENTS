@@ -22,6 +22,7 @@ from kernel.events import bus, Event
 from kernel.resolution_table import table
 from kernel.lattice_verifier import verifier
 from kernel.recovery_invariant import make_recovery_engine, RECOVERY_SPEC
+from kernel.observability import recorder, generate_trace_id, set_trace_id, clear_trace_id
 
 # Cell imports (will be populated as cells register)
 CELL_REGISTRY: dict = {}
@@ -88,6 +89,12 @@ class LifespanManager:
         # 6. Start self-test loop
         self._tasks.append(asyncio.create_task(self._self_test_loop()))
         
+        # Observability init
+        if settings.observability_enabled:
+            print(f"[main] Observability enabled — logs: {settings.observability_log_dir}")
+        else:
+            print("[main] Observability disabled via config")
+        
         self.running = True
         print("[main] System ONLINE")
         await bus.emit("system.online", {"version": "12.0", "spec": "PRIS"})
@@ -122,6 +129,7 @@ class LifespanManager:
         for cell in cells:
             await cell.init()
             CELL_REGISTRY[cell.name] = cell
+            recorder.update_cell_state(cell.name, cell.state.name)
             print(f"[main] Cell initialized: {cell.name}")
         
         # Wire cross-cell references
@@ -156,8 +164,15 @@ class LifespanManager:
             try:
                 await asyncio.wait_for(self._shutdown_event.wait(), timeout=RECOVERY_SPEC["self_test_interval_seconds"])
             except asyncio.TimeoutError:
-                ok = await self._recovery.self_test()
-                if not ok:
+                result = await self._recovery.self_test()
+                if not result.passed:
+                    recorder.record_self_test_failure(
+                        test_name=result.failed_test or "chain_integrity",
+                        cell=result.failed_cell or "system",
+                        reason=result.reason or "Event chain integrity check failed",
+                        exception=result.exception,
+                    )
+                    print(f"[main] Self-test failed — Cell: {result.failed_cell or 'system'} | Test: {result.failed_test or 'chain_integrity'} | Reason: {result.reason or 'Event chain integrity check failed'}")
                     # Heal once rather than warning on every cycle.
                     if bus.heal():
                         print("[main] Self-test: event chain healed")

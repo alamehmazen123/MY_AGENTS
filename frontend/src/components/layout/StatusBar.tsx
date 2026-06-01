@@ -1,8 +1,20 @@
+import { useState, useEffect } from 'react'
 import { useSessionStore } from '../../stores/sessionStore'
 
 export function StatusBar() {
   const activeId = useSessionStore((s) => s.activeSessionId)
   const session = useSessionStore((s) => s.sessions.find((x) => x.id === activeId))
+  const [traceId, setTraceId] = useState<string | null>(null)
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      fetch('/api/observability/trace-id')
+        .then((r) => r.json())
+        .then((d) => setTraceId(d.trace_id))
+        .catch(() => {})
+    }, 3000)
+    return () => clearInterval(id)
+  }, [])
 
   const agentAStatus = session?.agentA.status ?? 'online'
   const agentBStatus = session?.agentB.status ?? 'waiting'
@@ -36,6 +48,12 @@ export function StatusBar() {
           <span className={dotClass(agentBStatus, 'bg-orange-500')} />
           Agent-B: {label(agentBStatus)}
         </span>
+        {traceId && traceId !== 'NO_TRACE' && (
+          <span className="flex items-center gap-1 font-mono text-purple-400" title="Current request trace ID">
+            <span className="w-1.5 h-1.5 rounded-full bg-purple-500" />
+            {traceId}
+          </span>
+        )}
       </div>
       <span>PRIS v12.0</span>
     </footer>

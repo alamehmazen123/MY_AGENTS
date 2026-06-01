@@ -2,6 +2,7 @@
 cells/gateway/rest.py — FastAPI Routes
 """
 from __future__ import annotations
+import time
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,13 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 from kernel.config import settings
+from kernel.observability import (
+    generate_trace_id,
+    get_trace_id,
+    set_trace_id,
+    clear_trace_id,
+    recorder,
+)
 import logging
 
 # Forensic tool-trace logger
@@ -124,6 +132,36 @@ class RESTServer:
         self._server = None
 
     def _setup_routes(self):
+        # Observability middleware — injects trace_id into every request
+        @self.app.middleware("http")
+        async def observability_middleware(request: Request, call_next):
+            if not settings.observability_enabled:
+                return await call_next(request)
+
+            trace_id = request.headers.get("X-Trace-ID", generate_trace_id())
+            set_trace_id(trace_id)
+            recorder.begin_request(trace_id)
+            start = time.time()
+            try:
+                response = await call_next(request)
+                response.headers["X-Trace-ID"] = trace_id
+                return response
+            except Exception as e:
+                recorder.record_failure(
+                    "http_middleware",
+                    e,
+                    {"path": request.url.path, "method": request.method},
+                )
+                raise
+            finally:
+                duration_ms = (time.time() - start) * 1000
+                recorder.record_timeline(
+                    "Gateway", f"{request.method} {request.url.path}", duration_ms
+                )
+                recorder.record_performance("gateway", duration_ms)
+                recorder.end_request(trace_id)
+                clear_trace_id()
+
         @self.app.get("/health")
         async def health():
             return {"status": "ok", "version": "12.0"}
@@ -262,6 +300,37 @@ class RESTServer:
         @self.app.post("/api/mcp/reload")
         async def mcp_reload():
             return await self._mcp_reload()
+
+        # ---- Observability Dashboard Routes ----
+        @self.app.get("/api/observability/metrics")
+        async def observability_metrics():
+            from kernel.observability.dashboard import get_dashboard_metrics
+            return get_dashboard_metrics()
+
+        @self.app.get("/api/observability/traces")
+        async def observability_traces(n: int = 50):
+            from kernel.observability.dashboard import get_recent_traces
+            return {"traces": get_recent_traces(n)}
+
+        @self.app.get("/api/observability/failures")
+        async def observability_failures(n: int = 50):
+            from kernel.observability.dashboard import get_recent_failures
+            return {"failures": get_recent_failures(n)}
+
+        @self.app.get("/api/observability/logs")
+        async def observability_logs_list():
+            from kernel.observability.logger import list_log_files
+            return {"logs": list_log_files()}
+
+        @self.app.get("/api/observability/logs/{name}")
+        async def observability_log_tail(name: str, lines: int = 100):
+            from kernel.observability.logger import tail_log_file
+            return {"name": name, "lines": tail_log_file(name, lines)}
+
+        @self.app.get("/api/observability/trace-id")
+        async def observability_trace_id():
+            from kernel.observability.trace_context import get_trace_id
+            return {"trace_id": get_trace_id() or "NO_TRACE"}
 
     async def _list_ollama_models(self):
         import httpx
@@ -476,6 +545,9 @@ class RESTServer:
         import httpx
         import re
         import json
+        import time as _time
+        _prompt_start = _time.time()
+        recorder.record_timeline("Gateway", "received_prompt")
         body = await req.json()
         prompt_text = body.get("prompt", "")
         model = body.get("model", settings.ollama_default_model)
@@ -652,12 +724,25 @@ class RESTServer:
                     payload["keep_alive"] = "5m"
 
                     logger.info("stage=B ollama_request iteration=%s prompt_len=%s system_len=%s", iteration, len(current_prompt), len(full_system or ""))
+                    _ollama_start = _time.time()
+                    recorder.record_timeline("Agent-A", "ollama_request")
+                    recorder.record_agent_reasoning(
+                        agent="Agent-A",
+                        prompt_length=len(current_prompt),
+                        model=model,
+                        tools_detected=len(self._extract_tool_calls(current_prompt)),
+                        tools_executed=0,
+                        response_length=0,
+                    )
 
                     res = await client.post(
                         f"{settings.ollama_host}/api/generate",
                         json=payload,
                         timeout=300,
                     )
+                    _ollama_ms = (_time.time() - _ollama_start) * 1000
+                    recorder.record_timeline("Agent-A", "ollama_completed", _ollama_ms)
+                    recorder.record_performance("ollama", _ollama_ms)
                     if res.status_code != 200:
                         logger.info("stage=G ollama_error status=%s", res.status_code)
                         return {
@@ -710,7 +795,19 @@ class RESTServer:
                                             args[key] = str(wf / val)
 
                         logger.info("[TOOL_TRACE] stage=D dispatching_mcp preset=%s args=%s", tc["preset"], json.dumps(args))
+                        _mcp_start = _time.time()
                         result = await mcp_cell.invoke(tc["preset"], args, workspace=workspace_folder or None)
+                        _mcp_ms = (_time.time() - _mcp_start) * 1000
+                        _mcp_status = "SUCCESS" if (isinstance(result, dict) and not result.get("error")) else "FAILURE"
+                        recorder.record_mcp_call(
+                            tool=tc["preset"],
+                            args=args,
+                            duration_ms=_mcp_ms,
+                            status=_mcp_status,
+                            error=result.get("error") if isinstance(result, dict) else None,
+                        )
+                        recorder.record_timeline("MCP", f"tool_{tc['preset']}", _mcp_ms)
+                        recorder.record_performance("mcp", _mcp_ms)
                         logger.info("[TOOL_TRACE] stage=E tool_result preset=%s result=%s", tc["preset"], json.dumps(result)[:500])
                         tool_results.append({"call": tc, "result": result})
                         any_tool_executed = True
@@ -738,6 +835,7 @@ class RESTServer:
 
         except httpx.ConnectError as e:
             logger.info("stage=G ollama_connect_error")
+            recorder.record_failure("ollama_connect_error", e, {"model": model})
             return {
                 "error": "ollama_not_reachable",
                 "output": f"Cannot connect to Ollama at {settings.ollama_host}. Make sure 'ollama serve' is running.",
@@ -745,6 +843,7 @@ class RESTServer:
             }
         except httpx.TimeoutException:
             logger.info("stage=G ollama_timeout")
+            recorder.record_failure("ollama_timeout", None, {"model": model})
             return {
                 "error": "ollama_timeout",
                 "output": (
@@ -756,12 +855,16 @@ class RESTServer:
             }
         except Exception as e:
             logger.info("stage=G exception=%s", str(e))
+            recorder.record_failure("prompt_handler_exception", e, {"model": model})
             return {"error": str(e) or "unknown_error", "output": f"[Error: {str(e) or 'unknown error'}]", "model": model}
         finally:
             # Single unload at the end of this agent's turn — guarantees zero
             # models loaded before the next agent (B) starts, without paying the
             # reload cost on every tool iteration.
             await self._unload_model_quiet(model)
+            _prompt_total_ms = (_time.time() - _prompt_start) * 1000
+            recorder.record_timeline("Gateway", "response_sent", _prompt_total_ms)
+            recorder.record_performance("total_request", _prompt_total_ms)
 
         # PHASE 11 — Hallucination prevention
         if any_tool_executed:
@@ -778,10 +881,21 @@ class RESTServer:
                 rj = rj[:1500] + " …(truncated)"
             tool_context += f"- {tr['call']['preset']}({json.dumps(tr['call']['args'])}): {rj}\n"
 
+        recorder.record_agent_reasoning(
+            agent="Agent-A",
+            prompt_length=len(prompt_text),
+            model=model,
+            tools_detected=len(self._extract_tool_calls(prompt_text)),
+            tools_executed=len(all_tool_results),
+            response_length=len(final_response),
+        )
+
+        _current_trace_id = get_trace_id()
         return {
             "output": final_response,
             "model": model,
             "done": True,
+            "trace_id": _current_trace_id,
             "tool_context": tool_context,
             "tool_results": [
                 {

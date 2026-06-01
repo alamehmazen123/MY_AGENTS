@@ -7,6 +7,7 @@ import asyncio
 from cells.base import BaseCell, CellState
 from kernel.events import bus
 from kernel.config import settings
+from kernel.observability import recorder
 
 
 class RuntimeCell(BaseCell):
@@ -36,6 +37,7 @@ class RuntimeCell(BaseCell):
         self._stream_buffer = StreamBuffer()
         self._circuit_breaker = CircuitBreaker()
         self._thermal_monitor = ThermalMonitor()
+        recorder.update_cell_state(self.name, self.state.name)
         await bus.emit("cell.runtime.ready", {})
     
     async def enqueue(self, task: dict) -> str:
@@ -44,9 +46,12 @@ class RuntimeCell(BaseCell):
     
     async def run_task(self, task_id: str) -> dict:
         """Execute a task with single-model mutex."""
+        import time as _time
+        _task_start = _time.time()
         async with self._model_lock:
             task = self._queue.get(task_id)
             if not task:
+                recorder.record_failure("runtime_task_not_found", None, {"task_id": task_id})
                 return {"error": "task_not_found"}
             
             model = task["model"]
@@ -70,6 +75,9 @@ class RuntimeCell(BaseCell):
             
             # Cleanup
             await self._model_manager.unload_if_needed()
+            _task_ms = (_time.time() - _task_start) * 1000
+            recorder.record_timeline("Runtime", "task_completed", _task_ms)
+            recorder.record_performance("runtime", _task_ms)
             return result
     
     async def _execute_with_buffer(self, task: dict) -> dict:
@@ -92,6 +100,7 @@ class RuntimeCell(BaseCell):
             return await self._model_manager.switch(from_model, to_model)
     
     async def _on_shutdown(self):
+        recorder.update_cell_state(self.name, "offline")
         async with self._model_lock:
             await self._model_manager.unload_all()
         await bus.emit("cell.runtime.offline", {})

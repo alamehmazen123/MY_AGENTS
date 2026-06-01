@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Dict, Any
 import socketio
 from kernel.config import settings
+from kernel.observability import recorder, generate_trace_id, set_trace_id, clear_trace_id
 
 
 class WSServer:
@@ -18,15 +19,22 @@ class WSServer:
     def _setup_handlers(self):
         @self.sio.event
         async def connect(sid, environ):
+            recorder.record_timeline("WebSocket", "connect")
             await self.sio.enter_room(sid, "global")
         
         @self.sio.event
         async def disconnect(sid):
-            pass
+            recorder.record_timeline("WebSocket", "disconnect")
         
         @self.sio.on("prompt")
         async def on_prompt(sid, data):
-            await self.sio.emit("ack", {"status": "queued"}, room=sid)
+            trace_id = generate_trace_id()
+            set_trace_id(trace_id)
+            recorder.begin_request(trace_id)
+            recorder.record_timeline("WebSocket", "prompt_received")
+            await self.sio.emit("ack", {"status": "queued", "trace_id": trace_id}, room=sid)
+            recorder.end_request(trace_id)
+            clear_trace_id()
     
     async def start(self):
         import asyncio

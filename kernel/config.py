@@ -39,7 +39,16 @@ class Config(BaseSettings):
     ws_port: int = Field(default=8001, alias="MY_AGENTS_WS_PORT")
     cors_origins: List[str] = Field(default=["http://localhost:5173"], alias="MY_AGENTS_CORS_ORIGINS")
     
-    @field_validator("data_dir", "workspace_root", mode="before")
+    # Observability
+    observability_enabled: bool = Field(default=True, alias="MY_AGENTS_OBSERVABILITY_ENABLED")
+    observability_log_dir: Path = Field(default=Path("logs"), alias="MY_AGENTS_OBSERVABILITY_LOG_DIR")
+    observability_max_log_mb: int = Field(default=10, alias="MY_AGENTS_OBSERVABILITY_MAX_LOG_MB")
+    observability_max_log_backups: int = Field(default=10, alias="MY_AGENTS_OBSERVABILITY_MAX_LOG_BACKUPS")
+    observability_performance_window: int = Field(default=100, alias="MY_AGENTS_OBSERVABILITY_PERF_WINDOW")
+    observability_sample_rate: float = Field(default=1.0, alias="MY_AGENTS_OBSERVABILITY_SAMPLE_RATE")
+    observability_alert_webhook: str = Field(default="", alias="MY_AGENTS_ALERT_WEBHOOK")
+    
+    @field_validator("data_dir", "workspace_root", "observability_log_dir", mode="before")
     @classmethod
     def _resolve_path(cls, v):
         return Path(v).expanduser().resolve()

@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { AgentPanel } from '../chat/AgentPanel'
 import { PromptBar } from '../input/PromptBar'
+import { SystemTraceDashboard } from './SystemTraceDashboard'
 import { useSessionStore } from '../../stores/sessionStore'
 
 function shortArgs(args: any): string {
@@ -16,6 +18,7 @@ function shortArgs(args: any): string {
 }
 
 export function MainWorkspace() {
+  const [activeTab, setActiveTab] = useState<'chat' | 'trace'>('chat')
   const session = useSessionStore((s) => s.sessions.find((x) => x.id === s.activeSessionId))
   const executionResult = session?.executionResult
   const unloadStatus = useSessionStore((s) => s.unloadStatus)
@@ -28,6 +31,27 @@ export function MainWorkspace() {
 
   return (
     <main className="flex-1 flex flex-col overflow-hidden">
+      {/* View switcher */}
+      <div className="flex border-b border-gray-800 bg-gray-900">
+        {(['chat', 'trace'] as const).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={`px-4 py-2 text-xs font-medium capitalize transition-colors ${
+              activeTab === tab
+                ? 'text-white border-b-2 border-blue-500 bg-gray-800'
+                : 'text-gray-500 hover:text-gray-300'
+            }`}
+          >
+            {tab === 'chat' ? '💬 Chat' : '🔍 System Trace'}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'trace' ? (
+        <SystemTraceDashboard />
+      ) : (
+        <>
       {/* Top action bar */}
       {(canRevise || unloadStatus) && (
         <div className="px-3 py-2 bg-gray-800/80 border-b border-gray-700 flex items-center justify-between gap-3 flex-wrap">
@@ -83,6 +107,8 @@ export function MainWorkspace() {
         <AgentPanel agent="B" label="Agent-B" role="Reviewer" />
       </div>
       <PromptBar />
+        </>
+      )}
     </main>
   )
 }

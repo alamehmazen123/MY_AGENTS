@@ -7,6 +7,7 @@ import asyncio
 from cells.base import BaseCell, CellState
 from kernel.events import bus
 from kernel.config import settings
+from kernel.observability import recorder
 
 
 class DeliberationCell(BaseCell):
@@ -32,6 +33,7 @@ class DeliberationCell(BaseCell):
         self._budget = TokenBudget(settings.max_tokens_per_deliberation)
         self._compiler = ReasoningCompiler()
         self._pause_resume = PauseResume()
+        recorder.update_cell_state(self.name, self.state.name)
         await bus.emit("cell.deliberation.ready", {
             "max_tokens": settings.max_tokens_per_deliberation,
             "max_iterations": settings.max_iterations,
@@ -51,6 +53,7 @@ class DeliberationCell(BaseCell):
         capsule = self._capsule.begin(prompt, model)
         
         result = {"phases": [], "tokens_used": 0, "iterations": 0, "output": ""}
+        recorder.record_timeline("Deliberation", "run_started")
         
         try:
             for iteration in range(settings.max_iterations):
@@ -87,6 +90,8 @@ class DeliberationCell(BaseCell):
             capsule.end()
         
         result["elapsed_seconds"] = time.monotonic() - start
+        recorder.record_timeline("Deliberation", "run_completed", result["elapsed_seconds"] * 1000)
+        recorder.record_performance("deliberation", result["elapsed_seconds"] * 1000)
         return result
     
     async def _inference_step(self, prompt: str, model: str, context: dict, iteration: int) -> dict:
@@ -110,4 +115,5 @@ class DeliberationCell(BaseCell):
         self._pause_resume.resume()
     
     async def _on_shutdown(self):
+        recorder.update_cell_state(self.name, "offline")
         await bus.emit("cell.deliberation.offline", {})

@@ -9,6 +9,7 @@ from kernel.security.resource_limits import ResourceLimits
 from kernel.mcp.protocol.tool_definition import ToolCapability
 from kernel.mcp.runtime.execution_pool import ExecutionPool
 from kernel.telemetry.metrics import TelemetryCollector
+from kernel.observability import recorder
 from .registry import MCPRegistry
 from .supervisor import MCPSupervisor
 
@@ -43,6 +44,7 @@ class MCPCell(BaseCell):
 
         await self._load_presets()
         await self._supervisor.start()
+        recorder.update_cell_state(self.name, self.state.name)
         await bus.emit("cell.mcp.ready", {"presets_loaded": len(self._registry.list_tools())})
 
     async def _load_presets(self):
@@ -146,6 +148,13 @@ class MCPCell(BaseCell):
         status = result.get("status", "error")
         self._supervisor.record(preset, status)
         self._telemetry.record(preset, duration, status)
+        recorder.record_mcp_call(
+            tool=preset,
+            args=args,
+            duration_ms=duration * 1000,
+            status=status,
+            error=result.get("error") if isinstance(result, dict) else None,
+        )
 
         return result
 
@@ -172,5 +181,6 @@ class MCPCell(BaseCell):
         return self._registry.list_tools()
 
     async def _on_shutdown(self):
+        recorder.update_cell_state(self.name, "offline")
         await self._supervisor.shutdown()
         await bus.emit("cell.mcp.offline", {})

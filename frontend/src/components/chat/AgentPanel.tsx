@@ -68,7 +68,7 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
           </div>
         )}
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} role={msg.role} text={msg.text} streaming={msg.streaming} />
+          <MessageBubble key={msg.id} role={msg.role} text={msg.text} streaming={msg.streaming} traceId={msg.traceId} />
         ))}
         {hasAgentResponse && !isGenerating && (
           <div className="flex justify-center pt-2">

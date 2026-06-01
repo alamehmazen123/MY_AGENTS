@@ -5,6 +5,7 @@ Jail invariant enforcement.
 from __future__ import annotations
 from cells.base import BaseCell
 from kernel.events import bus
+from kernel.observability import recorder
 
 
 class WorkspaceCell(BaseCell):
@@ -30,17 +31,22 @@ class WorkspaceCell(BaseCell):
         self._transactions = TransactionManager()
         self._indexer = IncrementalIndexer()
         self._rollback = RollbackManager()
+        recorder.update_cell_state(self.name, self.state.name)
         await bus.emit("cell.workspace.ready", {})
     
     async def read_file(self, path: str) -> dict:
+        recorder.record_timeline("Workspace", "read_file")
         safe = self._guard.validate(path)
         if not safe:
+            recorder.record_failure("workspace_path_escape", None, {"path": path})
             return {"error": "path_escape_attempt_blocked"}
         return {"content": safe.read_text(encoding="utf-8")}
     
     async def write_file(self, path: str, content: str) -> dict:
+        recorder.record_timeline("Workspace", "write_file")
         safe = self._guard.validate(path)
         if not safe:
+            recorder.record_failure("workspace_path_escape", None, {"path": path})
             return {"error": "path_escape_attempt_blocked"}
         return await self._transactions.write(safe, content)
     
@@ -52,4 +58,5 @@ class WorkspaceCell(BaseCell):
         return await self._rollback.restore(snapshot_id)
     
     async def _on_shutdown(self):
+        recorder.update_cell_state(self.name, "offline")
         await bus.emit("cell.workspace.offline", {})

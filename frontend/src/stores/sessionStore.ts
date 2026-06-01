@@ -7,6 +7,7 @@ export interface AgentMessage {
   text: string
   timestamp: number
   streaming?: boolean
+  traceId?: string
 }
 
 export interface AgentState {
@@ -86,7 +87,7 @@ async function callOllama(
     contextLength?: number
     signal?: AbortSignal
   }
-): Promise<{ text: string; toolContext: string; toolResults: any[] }> {
+): Promise<{ text: string; toolContext: string; toolResults: any[]; traceId?: string }> {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), 340_000)
 
@@ -145,6 +146,7 @@ async function callOllama(
       text: data.output || '[No response from model]',
       toolContext: data.tool_context || '',
       toolResults: data.tool_results || [],
+      traceId: data.trace_id,
     }
   } catch (e: any) {
     clearTimeout(timeoutId)
@@ -436,7 +438,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
                       ...(agent === 'A' ? sess.agentA : sess.agentB),
                       messages: [
                         ...(agent === 'A' ? sess.agentA : sess.agentB).messages,
-                        { id: makeId(), role: 'agent', text: r.text, timestamp: Date.now() },
+                        { id: makeId(), role: 'agent', text: r.text, timestamp: Date.now(), traceId: r.traceId },
                       ],
                     },
                   }
@@ -522,7 +524,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
                     status: 'online',
                     messages: [
                       ...sess.agentA.messages,
-                      { id: makeId(), role: 'agent', text: newA, timestamp: Date.now() },
+                      { id: makeId(), role: 'agent', text: newA, timestamp: Date.now(), traceId: aResult.traceId },
                     ],
                   },
                   agentB: { ...sess.agentB, status: isBEnabled ? 'working' : sess.agentB.status },
@@ -573,7 +575,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
                     status: 'online',
                     messages: [
                       ...sess.agentB.messages,
-                      { id: makeId(), role: 'agent', text: bResult.text, timestamp: Date.now() },
+                      { id: makeId(), role: 'agent', text: bResult.text, timestamp: Date.now(), traceId: bResult.traceId },
                     ],
                   },
                 }
@@ -708,7 +710,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
           ...updatedA,
           messages: [
             ...updatedA.messages,
-            { id: makeId(), role: 'agent', text: responseA, timestamp: Date.now() },
+            { id: makeId(), role: 'agent', text: responseA, timestamp: Date.now(), traceId: aResult.traceId },
           ],
           status: 'online',
         }
@@ -801,7 +803,7 @@ Your task: produce the BEST final answer to the user's request.
           messages: [
             ...bReady.messages,
             { id: makeId(), role: 'context', text: `Agent-A said:\n${truncate(responseA, 800)}`, timestamp: Date.now() },
-            { id: makeId(), role: 'agent', text: responseB, timestamp: Date.now() },
+            { id: makeId(), role: 'agent', text: responseB, timestamp: Date.now(), traceId: bResult.traceId },
           ],
           status: 'online',
         }

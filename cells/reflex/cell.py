@@ -6,6 +6,7 @@ import time
 from cells.base import BaseCell, CellState
 from kernel.events import bus
 from kernel.universe import universe
+from kernel.observability import recorder
 
 
 class ReflexCell(BaseCell):
@@ -25,6 +26,7 @@ class ReflexCell(BaseCell):
         from cells.reflex.hydration import HydrationCache
         self._router = ReflexRouter()
         self._hydration = HydrationCache()
+        recorder.update_cell_state(self.name, self.state.name)
         await bus.emit("cell.reflex.ready", {"latency_target_ms": 50})
     
     async def handle(self, request_type: str, payload: dict) -> dict:
@@ -40,11 +42,15 @@ class ReflexCell(BaseCell):
         
         elapsed_ms = (time.monotonic() - start) * 1000
         result["_meta"] = {"elapsed_ms": elapsed_ms, "inference_calls": 0}
+        recorder.record_timeline("Reflex", f"handle_{request_type}", elapsed_ms)
+        recorder.record_performance("reflex", elapsed_ms)
         
         if elapsed_ms > 50:
+            recorder.record_failure("reflex_slo_violation", None, {"elapsed_ms": elapsed_ms, "request_type": request_type})
             await self.degrade(f"reflex_slo_violation: {elapsed_ms}ms")
         
         return result
     
     async def _on_shutdown(self):
+        recorder.update_cell_state(self.name, "offline")
         await bus.emit("cell.reflex.offline", {})
