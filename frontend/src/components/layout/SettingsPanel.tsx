@@ -85,6 +85,7 @@ export function SettingsPanel() {
         <div>
           <label className="text-xs text-gray-400 block mb-1">Preset Mode</label>
           <select
+            aria-label="Preset mode"
             value={preset}
             onChange={(e) => handlePresetChange(e.target.value as PresetName)}
             className="w-full bg-gray-800 text-gray-100 text-sm rounded border border-gray-700 px-2 py-1.5 focus:border-blue-500 focus:outline-none"
@@ -112,6 +113,7 @@ export function SettingsPanel() {
         <div>
           <label className="text-xs text-gray-400 block mb-1">Agent-A Model (Reasoner)</label>
           <select
+            aria-label="Agent-A model"
             value={agentAModel}
             onChange={(e) => handleModelAChange(e.target.value)}
             className="w-full bg-gray-800 text-gray-100 text-sm rounded border border-gray-700 px-2 py-1.5 focus:border-blue-500 focus:outline-none"
@@ -131,6 +133,7 @@ export function SettingsPanel() {
         <div>
           <label className="text-xs text-gray-400 block mb-1">Agent-B Model (Reviewer)</label>
           <select
+            aria-label="Agent-B model"
             value={agentBModel}
             onChange={(e) => handleModelBChange(e.target.value)}
             className="w-full bg-gray-800 text-gray-100 text-sm rounded border border-gray-700 px-2 py-1.5 focus:border-blue-500 focus:outline-none"

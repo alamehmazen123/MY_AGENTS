@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { AgentPanel } from '../chat/AgentPanel'
 import { PromptBar } from '../input/PromptBar'
 import { SystemTraceDashboard } from './SystemTraceDashboard'
+import { McpPanel } from './McpPanel'
+import { SettingsPanel } from './SettingsPanel'
 import { useSessionStore } from '../../stores/sessionStore'
 
 function shortArgs(args: any): string {
@@ -18,7 +20,7 @@ function shortArgs(args: any): string {
 }
 
 export function MainWorkspace() {
-  const [activeTab, setActiveTab] = useState<'chat' | 'trace'>('chat')
+  const [activeTab, setActiveTab] = useState<'chat' | 'trace' | 'mcp' | 'settings'>('chat')
   const session = useSessionStore((s) => s.sessions.find((x) => x.id === s.activeSessionId))
   const executionResult = session?.executionResult
   const unloadStatus = useSessionStore((s) => s.unloadStatus)
@@ -33,7 +35,7 @@ export function MainWorkspace() {
     <main className="flex-1 flex flex-col overflow-hidden">
       {/* View switcher */}
       <div className="flex border-b border-gray-800 bg-gray-900">
-        {(['chat', 'trace'] as const).map((tab) => (
+        {(['chat', 'trace', 'mcp', 'settings'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -43,13 +45,23 @@ export function MainWorkspace() {
                 : 'text-gray-500 hover:text-gray-300'
             }`}
           >
-            {tab === 'chat' ? '💬 Chat' : '🔍 System Trace'}
+            {tab === 'chat'
+              ? '💬 Chat'
+              : tab === 'trace'
+              ? '🔍 System Trace'
+              : tab === 'mcp'
+              ? '🛠 MCP'
+              : '⚙️ Settings'}
           </button>
         ))}
       </div>
 
       {activeTab === 'trace' ? (
         <SystemTraceDashboard />
+      ) : activeTab === 'mcp' ? (
+        <McpPanel />
+      ) : activeTab === 'settings' ? (
+        <SettingsPanel />
       ) : (
         <>
       {/* Top action bar */}
