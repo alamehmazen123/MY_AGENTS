@@ -20,6 +20,7 @@ export function LogViewer() {
   const logContents = useObservabilityStore((s) => s.logContents)
   const fetchLogs = useObservabilityStore((s) => s.fetchLogs)
   const fetchLogContents = useObservabilityStore((s) => s.fetchLogContents)
+  const clearLogContents = useObservabilityStore((s) => s.clearLogContents)
   const [activeLog, setActiveLog] = useState<string>('execution_timeline')
   const [lineCount, setLineCount] = useState<number>(50)
   const [copiedLine, setCopiedLine] = useState<number | null>(null)
@@ -55,12 +56,17 @@ export function LogViewer() {
 
   const currentLines = logContents[activeLog] || []
 
+  const clearCurrentLog = () => {
+    clearLogContents(activeLog)
+  }
+
   return (
     <div className="bg-gray-800 rounded border border-gray-700 p-3 space-y-2">
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-bold text-gray-300">📄 Log Files</h3>
         <div className="flex items-center gap-2">
           <select
+            aria-label="Lines to load"
             value={lineCount}
             onChange={(e) => setLineCount(Number(e.target.value))}
             className="bg-gray-900 text-gray-300 text-[10px] rounded border border-gray-700 px-1.5 py-0.5"
@@ -76,6 +82,12 @@ export function LogViewer() {
             className="px-2 py-0.5 rounded text-[10px] bg-gray-700 text-gray-300 hover:bg-gray-600 transition-colors"
           >
             📋 Copy All
+          </button>
+          <button
+            onClick={clearCurrentLog}
+            className="px-2 py-0.5 rounded text-[10px] bg-red-700 text-white hover:bg-red-600 transition-colors"
+          >
+            ✕ Clear
           </button>
         </div>
       </div>

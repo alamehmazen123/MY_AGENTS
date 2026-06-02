@@ -39,6 +39,8 @@ export function SystemTraceDashboard() {
   const metrics = useObservabilityStore((s) => s.metrics)
   const traces = useObservabilityStore((s) => s.traces)
   const failures = useObservabilityStore((s) => s.failures)
+  const clearTraces = useObservabilityStore((s) => s.clearTraces)
+  const clearFailures = useObservabilityStore((s) => s.clearFailures)
   const pollAll = useObservabilityStore((s) => s.pollAll)
   const [autoRefresh, setAutoRefresh] = useState(true)
 
@@ -98,7 +100,15 @@ export function SystemTraceDashboard() {
 
       {/* Recent traces */}
       <div className="bg-gray-800 rounded border border-gray-700 p-3">
-        <h3 className="text-xs font-bold text-gray-300 mb-2">Recent MCP Traces</h3>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-xs font-bold text-gray-300">Recent MCP Traces</h3>
+          <button
+            onClick={clearTraces}
+            className="px-2 py-0.5 rounded text-[10px] bg-red-700 text-white hover:bg-red-600 transition-colors"
+          >
+            ✕ Clear
+          </button>
+        </div>
         {traces.length === 0 ? (
           <div className="text-gray-500">No traces yet</div>
         ) : (
@@ -120,7 +130,15 @@ export function SystemTraceDashboard() {
 
       {/* Recent failures */}
       <div className="bg-gray-800 rounded border border-gray-700 p-3">
-        <h3 className="text-xs font-bold text-gray-300 mb-2">Recent Failures</h3>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-xs font-bold text-gray-300">Recent Failures</h3>
+          <button
+            onClick={clearFailures}
+            className="px-2 py-0.5 rounded text-[10px] bg-red-700 text-white hover:bg-red-600 transition-colors"
+          >
+            ✕ Clear
+          </button>
+        </div>
         {failures.length === 0 ? (
           <div className="text-gray-500">No failures — system healthy</div>
         ) : (

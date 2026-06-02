@@ -44,6 +44,9 @@ interface ObservabilityState {
   fetchFailures: (n?: number) => Promise<void>
   fetchLogs: () => Promise<void>
   fetchLogContents: (name: string, lines?: number) => Promise<void>
+  clearLogContents: (name: string) => void
+  clearTraces: () => void
+  clearFailures: () => void
   pollAll: () => Promise<void>
 }
 
@@ -126,6 +129,15 @@ export const useObservabilityStore = create<ObservabilityState>((set) => ({
       // silent fail
     }
   },
+
+  clearLogContents: (name: string) => set((s) => ({
+    logContents: { ...s.logContents, [name]: [] },
+    lastUpdated: Date.now(),
+  })),
+
+  clearTraces: () => set({ traces: [] }),
+
+  clearFailures: () => set({ failures: [] }),
 
   pollAll: async () => {
     const state = useObservabilityStore.getState()
