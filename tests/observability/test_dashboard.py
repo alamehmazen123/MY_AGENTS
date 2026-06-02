@@ -2,9 +2,11 @@
 from __future__ import annotations
 import pytest
 from kernel.observability.dashboard import (
+    clear_recent_failures,
+    clear_recent_traces,
     get_dashboard_metrics,
-    get_recent_traces,
     get_recent_failures,
+    get_recent_traces,
 )
 from kernel.observability.recorder import recorder
 
@@ -50,3 +52,24 @@ def test_dashboard_integration():
 
     failures = get_recent_failures(5)
     assert any(f["category"] == "test_fail" for f in failures)
+
+
+def test_clear_recent_trace_and_failure_history():
+    from kernel.observability.trace_context import set_trace_id, clear_trace_id
+
+    clear_recent_traces()
+    clear_recent_failures()
+
+    set_trace_id("TRACE-DASH-002")
+    recorder.record_mcp_call("test_tool_clear", {"x": 1}, 5.0, "SUCCESS")
+    recorder.record_failure("test_fail_clear", None, {"detail": "clear test"})
+    clear_trace_id()
+
+    assert any(t["tool"] == "test_tool_clear" for t in get_recent_traces(5))
+    assert any(f["category"] == "test_fail_clear" for f in get_recent_failures(5))
+
+    clear_recent_traces()
+    clear_recent_failures()
+
+    assert get_recent_traces(5) == []
+    assert get_recent_failures(5) == []

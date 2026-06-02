@@ -293,6 +293,14 @@ class ObservabilityRecorder:
         with self._lock:
             return list(self._failed_requests)[-n:]
 
+    def clear_recent_traces(self) -> None:
+        with self._lock:
+            self._tool_calls.clear()
+
+    def clear_recent_failures(self) -> None:
+        with self._lock:
+            self._failed_requests.clear()
+
 
 # Singleton ---------------------------------------------------------------
 recorder = ObservabilityRecorder()

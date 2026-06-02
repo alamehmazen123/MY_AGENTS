@@ -63,3 +63,24 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## 5. Project Baseline
+
+- Repo: `my_agents` — a local AI cognitive workspace powered by Ollama, FastAPI backend, React/Vite frontend, and SQLite persistence.
+- Startup sequence:
+  1. Run `ollama serve`
+  2. Run `python kernel/main.py`
+  3. In `frontend/`: run `npm install` and `npm run dev`
+- Observability/systems trace:
+  - Clear buttons now wipe in-memory traces/failures and truncate log files on disk.
+  - UI shows a confirmation message after a successful clear.
+- Ollama gateway behavior:
+  - The exact request body model is logged for prompt debugging.
+  - Default `num_predict` is reduced to `1024` to avoid runaway long generations.
+  - Ollama request timeout is extended to `600s` for slow cold loads.
+  - `keep_alive` remains `5m` to keep models resident during a user turn.
+- Agent flow:
+  - Dual-agent loop: Agent-A reasons and may invoke MCP tools; Agent-B reviews and finalizes.
+  - `/api/prompt` is the main backend endpoint for model requests.
+
+Use this section as the current setup baseline for future prompts and change requests.

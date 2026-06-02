@@ -44,9 +44,9 @@ interface ObservabilityState {
   fetchFailures: (n?: number) => Promise<void>
   fetchLogs: () => Promise<void>
   fetchLogContents: (name: string, lines?: number) => Promise<void>
-  clearLogContents: (name: string) => void
-  clearTraces: () => void
-  clearFailures: () => void
+  clearLogContents: (name: string) => Promise<void>
+  clearTraces: () => Promise<void>
+  clearFailures: () => Promise<void>
   pollAll: () => Promise<void>
 }
 
@@ -130,14 +130,36 @@ export const useObservabilityStore = create<ObservabilityState>((set) => ({
     }
   },
 
-  clearLogContents: (name: string) => set((s) => ({
-    logContents: { ...s.logContents, [name]: [] },
-    lastUpdated: Date.now(),
-  })),
+  clearLogContents: async (name: string) => {
+    set((s) => ({
+      logContents: { ...s.logContents, [name]: [] },
+      lastUpdated: Date.now(),
+    }))
+    try {
+      await fetch(`/api/observability/logs/${name}/clear`, { method: 'POST' })
+      get().fetchLogs()
+    } catch {
+      // best-effort
+    }
+  },
 
-  clearTraces: () => set({ traces: [] }),
+  clearTraces: async () => {
+    set({ traces: [], lastUpdated: Date.now() })
+    try {
+      await fetch('/api/observability/clear/traces', { method: 'POST' })
+    } catch {
+      // best-effort
+    }
+  },
 
-  clearFailures: () => set({ failures: [] }),
+  clearFailures: async () => {
+    set({ failures: [], lastUpdated: Date.now() })
+    try {
+      await fetch('/api/observability/clear/failures', { method: 'POST' })
+    } catch {
+      // best-effort
+    }
+  },
 
   pollAll: async () => {
     const state = useObservabilityStore.getState()

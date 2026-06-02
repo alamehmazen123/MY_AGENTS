@@ -43,6 +43,7 @@ export function SystemTraceDashboard() {
   const clearFailures = useObservabilityStore((s) => s.clearFailures)
   const pollAll = useObservabilityStore((s) => s.pollAll)
   const [autoRefresh, setAutoRefresh] = useState(true)
+  const [confirmMessage, setConfirmMessage] = useState<string | null>(null)
 
   useEffect(() => {
     pollAll()
@@ -67,6 +68,11 @@ export function SystemTraceDashboard() {
           Auto-refresh (2s)
         </label>
       </div>
+      {confirmMessage && (
+        <div className="rounded border border-green-500/30 bg-green-500/10 px-3 py-2 text-[11px] text-green-200">
+          {confirmMessage}
+        </div>
+      )}
 
       {/* Metrics cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
@@ -103,7 +109,11 @@ export function SystemTraceDashboard() {
         <div className="flex items-center justify-between mb-2">
           <h3 className="text-xs font-bold text-gray-300">Recent MCP Traces</h3>
           <button
-            onClick={clearTraces}
+            onClick={async () => {
+              await clearTraces()
+              setConfirmMessage('All traces cleared')
+              setTimeout(() => setConfirmMessage(null), 2500)
+            }}
             className="px-2 py-0.5 rounded text-[10px] bg-red-700 text-white hover:bg-red-600 transition-colors"
           >
             ✕ Clear
@@ -133,7 +143,11 @@ export function SystemTraceDashboard() {
         <div className="flex items-center justify-between mb-2">
           <h3 className="text-xs font-bold text-gray-300">Recent Failures</h3>
           <button
-            onClick={clearFailures}
+            onClick={async () => {
+              await clearFailures()
+              setConfirmMessage('All failures cleared')
+              setTimeout(() => setConfirmMessage(null), 2500)
+            }}
             className="px-2 py-0.5 rounded text-[10px] bg-red-700 text-white hover:bg-red-600 transition-colors"
           >
             ✕ Clear

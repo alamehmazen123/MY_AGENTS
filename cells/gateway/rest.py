@@ -327,6 +327,24 @@ class RESTServer:
             from kernel.observability.logger import tail_log_file
             return {"name": name, "lines": tail_log_file(name, lines)}
 
+        @self.app.post("/api/observability/clear/traces")
+        async def observability_clear_traces():
+            from kernel.observability.dashboard import clear_recent_traces
+            clear_recent_traces()
+            return {"ok": True}
+
+        @self.app.post("/api/observability/clear/failures")
+        async def observability_clear_failures():
+            from kernel.observability.dashboard import clear_recent_failures
+            clear_recent_failures()
+            return {"ok": True}
+
+        @self.app.post("/api/observability/logs/{name}/clear")
+        async def observability_clear_log(name: str):
+            from kernel.observability.logger import clear_log_file
+            success = clear_log_file(name)
+            return {"ok": success}
+
         @self.app.get("/api/observability/trace-id")
         async def observability_trace_id():
             from kernel.observability.trace_context import get_trace_id
@@ -589,6 +607,8 @@ class RESTServer:
         if tools_enabled:
             full_system = system + "\n\n" + TOOL_INSTRUCTIONS
 
+        logger.info("[REQUEST_BODY] model=%s preset=%s no_tools=%s workspace_folder=%s",
+                    model, preset_name, no_tools, workspace_folder)
         logger.info("[TOOL_TRACE] stage=A preset=%s model=%s no_tools=%s tools_enabled=%s mcp_available=%s prompt_preview=%s",
                     preset_name, model, no_tools, tools_enabled, mcp_cell is not None, prompt_text[:200])
 
@@ -685,7 +705,7 @@ class RESTServer:
                 if len(current_prompt) > MAX_PROMPT_LEN:
                     current_prompt = current_prompt[:MAX_PROMPT_LEN] + "\n\n[...truncated by backend]"
 
-                async with httpx.AsyncClient(timeout=300) as client:
+                async with httpx.AsyncClient(timeout=600) as client:
                     payload = {
                         "model": model,
                         "prompt": current_prompt,
@@ -707,7 +727,7 @@ class RESTServer:
                     # Cap output length. Without this, small models can ramble until
                     # they fill the whole context window (thousands of tokens), which
                     # takes minutes and trips the request timeout. Override via body.
-                    options["num_predict"] = body.get("max_tokens", 2048)
+                    options["num_predict"] = body.get("max_tokens", 1024)
                     payload["options"] = options
 
                     # Disable extended "thinking" for reasoning models (qwen3,
@@ -724,6 +744,8 @@ class RESTServer:
                     payload["keep_alive"] = "5m"
 
                     logger.info("stage=B ollama_request iteration=%s prompt_len=%s system_len=%s", iteration, len(current_prompt), len(full_system or ""))
+                    logger.info("[OLLAMA_BODY] model=%s num_predict=%s temperature=%s context_length=%s keep_alive=%s think=%s",
+                                payload.get("model"), options.get("num_predict"), options.get("temperature"), context_length, payload.get("keep_alive"), payload.get("think"))
                     _ollama_start = _time.time()
                     recorder.record_timeline("Agent-A", "ollama_request")
                     recorder.record_agent_reasoning(
@@ -738,7 +760,7 @@ class RESTServer:
                     res = await client.post(
                         f"{settings.ollama_host}/api/generate",
                         json=payload,
-                        timeout=300,
+                        timeout=600,
                     )
                     _ollama_ms = (_time.time() - _ollama_start) * 1000
                     recorder.record_timeline("Agent-A", "ollama_completed", _ollama_ms)

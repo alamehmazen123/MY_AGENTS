@@ -17,3 +17,13 @@ def get_recent_traces(n: int = 50) -> List[dict]:
 def get_recent_failures(n: int = 50) -> List[dict]:
     """Return recent failures."""
     return recorder.get_recent_failures(n)
+
+
+def clear_recent_traces() -> None:
+    """Clear recent MCP tool traces."""
+    recorder.clear_recent_traces()
+
+
+def clear_recent_failures() -> None:
+    """Clear recent failure entries."""
+    recorder.clear_recent_failures()

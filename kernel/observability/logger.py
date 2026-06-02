@@ -73,6 +73,21 @@ _LOG_NAME_MAP = {
 }
 
 
+def clear_log_file(name: str) -> bool:
+    """Truncate the named observability log file."""
+    filename = _LOG_NAME_MAP.get(name)
+    if not filename:
+        return False
+    log_path = settings.observability_log_dir / filename
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "w", encoding="utf-8"):
+            pass
+        return True
+    except Exception:
+        return False
+
+
 def tail_log_file(name: str, lines: int = 100) -> list[str]:
     """Tail the last N lines from a named observability log file.
     Returns empty list if file does not exist or name is unknown."""

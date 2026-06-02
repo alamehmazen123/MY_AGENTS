@@ -24,6 +24,7 @@ export function LogViewer() {
   const [activeLog, setActiveLog] = useState<string>('execution_timeline')
   const [lineCount, setLineCount] = useState<number>(50)
   const [copiedLine, setCopiedLine] = useState<number | null>(null)
+  const [confirmMessage, setConfirmMessage] = useState<string | null>(null)
 
   useEffect(() => {
     fetchLogs()
@@ -56,15 +57,18 @@ export function LogViewer() {
 
   const currentLines = logContents[activeLog] || []
 
-  const clearCurrentLog = () => {
-    clearLogContents(activeLog)
+  const clearCurrentLog = async () => {
+    await clearLogContents(activeLog)
+    setConfirmMessage(`Cleared ${activeLog.replace(/_/g, ' ')}`)
+    setTimeout(() => setConfirmMessage(null), 2500)
   }
 
   return (
     <div className="bg-gray-800 rounded border border-gray-700 p-3 space-y-2">
-      <div className="flex items-center justify-between">
-        <h3 className="text-xs font-bold text-gray-300">📄 Log Files</h3>
-        <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs font-bold text-gray-300">📄 Log Files</h3>
+          <div className="flex items-center gap-2">
           <select
             aria-label="Lines to load"
             value={lineCount}
@@ -89,7 +93,13 @@ export function LogViewer() {
           >
             ✕ Clear
           </button>
+          </div>
         </div>
+        {confirmMessage && (
+          <div className="rounded border border-green-500/30 bg-green-500/10 px-2 py-1 text-[10px] text-green-200">
+            {confirmMessage}
+          </div>
+        )}
       </div>
 
       {/* Log selector tabs */}
