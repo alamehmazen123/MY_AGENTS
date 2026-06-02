@@ -80,6 +80,22 @@ def clear_log_file(name: str) -> bool:
         return False
     log_path = settings.observability_log_dir / filename
     try:
+        logger = logging.getLogger(f"my_agents.observability.{name}")
+        for handler in logger.handlers:
+            if isinstance(handler, logging.handlers.RotatingFileHandler):
+                if getattr(handler, "baseFilename", None) == str(log_path):
+                    # Truncate while the handler is still open so subsequent
+                    # log writes continue correctly.
+                    handler.acquire()
+                    try:
+                        if handler.stream is not None:
+                            handler.stream.flush()
+                            handler.stream.truncate(0)
+                            handler.stream.seek(0)
+                            handler.flush()
+                    finally:
+                        handler.release()
+                    return True
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w", encoding="utf-8"):
             pass

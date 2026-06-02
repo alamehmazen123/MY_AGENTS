@@ -137,7 +137,8 @@ export const useObservabilityStore = create<ObservabilityState>((set) => ({
     }))
     try {
       await fetch(`/api/observability/logs/${name}/clear`, { method: 'POST' })
-      get().fetchLogs()
+      await get().fetchLogs()
+      await get().fetchLogContents(name)
     } catch {
       // best-effort
     }
