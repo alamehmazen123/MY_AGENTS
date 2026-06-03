@@ -89,7 +89,8 @@ async function callOllama(
   }
 ): Promise<{ text: string; toolContext: string; toolResults: any[]; traceId?: string }> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 340_000)
+  const timeoutMs = 900_000 // 15m: match backend Ollama request timeout for long model generations
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
   if (opts?.signal) {
     const onAbort = () => {

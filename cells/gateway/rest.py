@@ -716,7 +716,7 @@ class RESTServer:
                 if len(current_prompt) > MAX_PROMPT_LEN:
                     current_prompt = current_prompt[:MAX_PROMPT_LEN] + "\n\n[...truncated by backend]"
 
-                async with httpx.AsyncClient(timeout=600) as client:
+                async with httpx.AsyncClient(timeout=900) as client:
                     # Prepend the project-wide core instructions (Karpathy
                     # guidelines) to EVERY agent/preset, on every generation.
                     core = _load_core_instructions()
@@ -773,7 +773,7 @@ class RESTServer:
                     res = await client.post(
                         f"{settings.ollama_host}/api/chat",
                         json=chat_payload,
-                        timeout=600,
+                        timeout=900,
                     )
                     _ollama_ms = (_time.time() - _ollama_start) * 1000
                     recorder.record_timeline("Agent-A", "ollama_completed", _ollama_ms)
@@ -893,7 +893,7 @@ class RESTServer:
             return {
                 "error": "ollama_timeout",
                 "output": (
-                    f"[Error: '{model}' did not respond within 300s. "
+                    f"[Error: '{model}' did not respond within 900s. "
                     "It may be cold-loading a large model or generating too much. "
                     "Try a smaller model or a simpler prompt.]"
                 ),

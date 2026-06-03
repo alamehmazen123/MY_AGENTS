@@ -77,7 +77,10 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Ollama gateway behavior:
   - The exact request body model is logged for prompt debugging.
   - Default `num_predict` is reduced to `1024` to avoid runaway long generations.
-  - Ollama request timeout is extended to `600s` for slow cold loads.
+  - Ollama request timeout is extended to `900s` for slow cold loads and long
+    CPU-bound generations.
+  - Frontend `/api/prompt` abort timeout is aligned to `900s` so slow-but-successful
+    model responses are not cut off prematurely.
   - `keep_alive` remains `5m` to keep models resident during a user turn.
 - Agent flow:
   - Dual-agent loop: Agent-A reasons and may invoke MCP tools; Agent-B reviews and finalizes.

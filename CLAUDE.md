@@ -56,6 +56,8 @@ Stack: FastAPI + React/Vite + SQLite + Ollama. Windows-first (PowerShell, Edge).
   single unload happens once in the `finally` block.
 - **Cap output with `num_predict` (default 1024, override via `max_tokens`)** or
   small models ramble until they fill the context window and time out.
+- **Frontend `/api/prompt` abort timeout is aligned to 900s** and the backend
+  Ollama request timeout is also 900s to support slow qwen2.5-coder/CPU generations.
 - **Disable thinking for reasoning models** (`payload["think"] = False` for
   qwen3 / deepseek-r1 / gpt-oss) — their hidden CoT caused timeouts.
 - **Fast-path summary after a successful tool** — don't run another (slow) model
