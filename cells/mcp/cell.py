@@ -180,6 +180,40 @@ class MCPCell(BaseCell):
     def list_tools(self) -> list[dict]:
         return self._registry.list_tools()
 
+    def ollama_tools(self, names: list[str] | None = None) -> list[dict]:
+        """Build OpenAI/Ollama-style function specs from each preset's SCHEMA,
+        for native tool calling via /api/chat. Cached after first build."""
+        import importlib
+        if getattr(self, "_ollama_tools_cache", None) is None:
+            specs = []
+            for t in self._registry.list_tools():
+                name = t["name"]
+                try:
+                    mod = importlib.import_module(f"cells.mcp.presets.{name}")
+                    schema = getattr(mod, "SCHEMA", None)
+                except Exception:
+                    schema = None
+                params = (schema or {}).get("parameters", {}) if isinstance(schema, dict) else {}
+                # Normalise each param to a JSON-schema property object.
+                props = {}
+                for pname, pdef in (params or {}).items():
+                    props[pname] = pdef if isinstance(pdef, dict) else {"type": "string"}
+                required = (schema or {}).get("required", []) if isinstance(schema, dict) else []
+                desc = (schema or {}).get("description") if isinstance(schema, dict) else None
+                specs.append({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": desc or t.get("description", "")[:200],
+                        "parameters": {"type": "object", "properties": props, "required": required},
+                    },
+                })
+            self._ollama_tools_cache = specs
+        if names:
+            keep = set(names)
+            return [s for s in self._ollama_tools_cache if s["function"]["name"] in keep]
+        return self._ollama_tools_cache
+
     async def _on_shutdown(self):
         recorder.update_cell_state(self.name, "offline")
         await self._supervisor.shutdown()

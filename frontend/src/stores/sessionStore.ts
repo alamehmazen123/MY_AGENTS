@@ -288,6 +288,18 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
     switchSession: (id: string) => {
       set({ activeSessionId: id })
+      // Sync the Settings model dropdowns to this session so what the panel
+      // shows == what the dropdown shows == what actually gets sent. Without
+      // this, the global settings model can diverge from the session's model
+      // (the panel header), causing the backend to receive a different model
+      // than the user believes they selected.
+      const sess = get().sessions.find((s) => s.id === id)
+      if (sess) {
+        const patch: any = {}
+        if (sess.agentA.model) patch.agentAModel = sess.agentA.model
+        patch.agentBModel = sess.agentB.model || ''
+        useSettingsStore.setState(patch)
+      }
     },
 
     renameSession: (id: string, name: string) => {
@@ -405,7 +417,10 @@ export const useSessionStore = create<SessionState>((set, get) => {
         // ── PASS 2: if nothing to run, ASK the agent to actually do the work. ──
         if (steps.length === 0) {
           set({ unloadStatus: `Asking Agent-${agent} to generate an executable plan...` })
-          const model = agent === 'A' ? settings.agentAModel : settings.agentBModel
+          const model =
+            agent === 'A'
+              ? session.agentA.model || settings.agentAModel
+              : session.agentB.model || settings.agentBModel
           const seedAnswer = targetMsg?.text || otherMsg?.text || ''
           const execPrompt =
             `ORIGINAL USER REQUEST:\n"""${originalRequest}"""\n\n` +
@@ -464,7 +479,9 @@ export const useSessionStore = create<SessionState>((set, get) => {
       const session = state.sessions.find((s) => s.id === state.activeSessionId)
       if (!session) return
       const settings = useSettingsStore.getState()
-      const isBEnabled = !!settings.agentBModel && settings.preset !== 'CHAT'
+      const agentAModel = session.agentA.model || settings.agentAModel
+      const agentBModel = session.agentB.model || settings.agentBModel
+      const isBEnabled = !!agentBModel && settings.preset !== 'CHAT'
 
       // Use the most recent agent response as the seed for the revision. If
       // Agent-B has spoken, use B; otherwise the most recent A message.
@@ -500,7 +517,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
           `If the request needs tools, emit [[MCP:tool:{json}]] calls. Never invent data.\n\n` +
           `=== PREVIOUS ANSWER ===\n${truncate(seed, 4000)}\n=== END ===\n\n` +
           `Now produce your improved version.`
-        const aResult = await callOllama(revisePromptA, settings.agentAModel, settings.systemPromptA, {
+        const aResult = await callOllama(revisePromptA, agentAModel, settings.systemPromptA, {
           workspaceFolder: session.workspaceFolder,
           enableTools: settings.preset !== 'CHAT',
           temperature: settings.temperatureA,
@@ -539,20 +556,22 @@ export const useSessionStore = create<SessionState>((set, get) => {
           return
         }
 
-        // ── Phase 2: Agent-B reviews A's NEW answer ──
+        // ── Phase 2: Agent-B reviews A's NEW answer INDEPENDENTLY ──
         const groundTruth = toolCtxA
-          ? `\nACTUAL TOOL RESULTS (ground truth):\n${truncate(toolCtxA, 3000)}\n`
+          ? `\nAgent-A's tool results (real data):\n${truncate(toolCtxA, 3000)}\n`
           : ''
         const reviewPromptB =
           `Agent-A produced this revised answer:\n"""${truncate(newA, 4000)}"""\n${groundTruth}\n` +
-          `Produce an even better final answer. Correct any mistakes using the actual tool results ` +
-          `above. CRITICAL: never invent data (file names, headlines, IPs, numbers). Do NOT write ` +
-          `code or describe steps; the tools already ran. Be concise.`
+          `As an INDEPENDENT reviewer, produce an even better final answer. Verify Agent-A's claims ` +
+          `with tools before repeating them (e.g. confirm a file was really written). If Agent-A asked ` +
+          `for clarification while a folder/files are available, investigate yourself instead. Detect ` +
+          `and fix mistakes. NEVER invent data. Be concise and structured.`
         const reviewSystem =
-          'You are a fact-checking reviewer. You verify and improve an answer using the real ' +
-          'tool results provided. You never fabricate data and never write code.'
-        const bResult = await callOllama(reviewPromptB, settings.agentBModel, reviewSystem, {
-          enableTools: false,
+          'You are an independent senior reviewer. You verify claims with tools, fix mistakes, and ' +
+          'investigate the workspace yourself rather than asking for clarification. You never fabricate data.'
+        const bResult = await callOllama(reviewPromptB, agentBModel, reviewSystem, {
+          workspaceFolder: session.workspaceFolder,
+          enableTools: settings.preset !== 'CHAT',
           temperature: settings.temperatureB,
           contextLength: settings.contextLength,
           signal: abortCtrl.signal,
@@ -622,7 +641,11 @@ export const useSessionStore = create<SessionState>((set, get) => {
       const settings = useSettingsStore.getState()
       const files = opts.files ?? session.attachedFiles
       const folder = opts.folder ?? session.workspaceFolder
-      const isBEnabled = !!settings.agentBModel && settings.preset !== 'CHAT'
+      // The model shown in the panel header IS the model we send (session is the
+      // source of truth; settings is only a fallback for a brand-new session).
+      const agentAModel = session.agentA.model || settings.agentAModel
+      const agentBModel = session.agentB.model || settings.agentBModel
+      const isBEnabled = !!agentBModel && settings.preset !== 'CHAT'
 
       const fullPrompt = buildPrompt(text, files, folder)
 
@@ -641,12 +664,12 @@ export const useSessionStore = create<SessionState>((set, get) => {
         ...session.agentA,
         messages: [...session.agentA.messages, userMsg],
         status: 'working',
-        model: settings.agentAModel,
+        model: agentAModel,
       }
       const updatedB: AgentState = {
         ...session.agentB,
         status: isBEnabled ? 'waiting' : 'disabled',
-        model: isBEnabled ? settings.agentBModel : '',
+        model: isBEnabled ? agentBModel : '',
       }
       set((s) => ({
         sessions: s.sessions.map((sess) =>
@@ -663,7 +686,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
         // Agent-A is the "doer" — it always has tool access (the whole point of a
         // Claude-Code-style agent). The MCP toggle only affects whether the user
         // can turn this off explicitly; by default A can read/write the workspace.
-        const aResult = await callOllama(fullPrompt, settings.agentAModel, settings.systemPromptA, {
+        const aResult = await callOllama(fullPrompt, agentAModel, settings.systemPromptA, {
           workspaceFolder: folder,
           attachedFiles: files,
           enableTools: settings.preset !== 'CHAT',
@@ -738,10 +761,10 @@ export const useSessionStore = create<SessionState>((set, get) => {
           ),
         }))
 
-        // ── Phase 2: Agent-B reviews ──
+        // ── Phase 2: Agent-B reviews INDEPENDENTLY ──
         const truncatedA = truncate(responseA, 4000)
         const groundTruth = toolContextA
-          ? `\nACTUAL TOOL RESULTS (ground truth — the real data from the user's machine):\n${truncate(toolContextA, 3000)}\n`
+          ? `\nAgent-A's tool results (real data from the machine):\n${truncate(toolContextA, 3000)}\n`
           : ''
         const reviewPrompt = `The user asked:
 
@@ -751,18 +774,22 @@ Agent-A answered:
 
 """${truncatedA}"""
 ${groundTruth}
-Your task: produce the BEST final answer to the user's request.
-- Correct any mistakes in Agent-A's answer using the ACTUAL TOOL RESULTS above as the source of truth.
-- CRITICAL: never invent or guess data. Do NOT make up file names, news headlines, IP addresses, or numbers. If the tool results don't contain something (e.g. no headline was returned), say it is unavailable — do NOT fabricate a plausible value.
-- Do NOT write code or describe steps; the tools already ran. Just give the direct, corrected answer.
-- Be concise. Do not repeat raw JSON.`
+You are an INDEPENDENT senior reviewer. Do NOT simply agree with or repeat Agent-A.
+- First decide if Agent-A actually answered the request. If Agent-A asked for clarification or said the request was unclear, but a workspace folder or attached files ARE available, that is a MISTAKE — investigate it YOURSELF: use the tools (file_explorer to list/read files, search_ripgrep, etc.) to inspect the folder/files and produce a real answer.
+- Independently verify Agent-A's claims. If Agent-A claims an action succeeded (e.g. "file created"), confirm it with a tool before repeating the claim. Never restate an unverified claim.
+- Detect and fix bugs, wrong assumptions, and hallucinations. Explain what was wrong, then give the corrected, better answer/plan.
+- NEVER invent data (file names, numbers, headlines, IPs). If something is genuinely unavailable, say so.
+- Be concise and structured. Do not repeat raw JSON.`
 
         const reviewSystem =
-          'You are a fact-checking assistant. You verify and correct an answer using the real tool results provided. ' +
-          'You never fabricate data and never write code — you report the actual results.'
+          'You are an independent senior reviewer and problem-solver. You verify claims with tools, ' +
+          'find and correct mistakes, and proactively investigate the workspace/attachments instead of ' +
+          'asking the user for clarification. You never fabricate data.'
 
-        const bResult = await callOllama(reviewPrompt, settings.agentBModel, reviewSystem, {
-          enableTools: false,
+        const bResult = await callOllama(reviewPrompt, agentBModel, reviewSystem, {
+          workspaceFolder: folder,
+          attachedFiles: files,
+          enableTools: settings.preset !== 'CHAT',
           temperature: settings.temperatureB,
           contextLength: settings.contextLength,
           signal: abortCtrl.signal,

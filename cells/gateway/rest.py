@@ -79,6 +79,10 @@ REVIEW_SYSTEM_PROMPT = (
 
 TOOL_INSTRUCTIONS = (
     "You are an agent with DIRECT ACCESS to local tools. "
+    "BEFORE reasoning or answering, ALWAYS account for the current context: the attached "
+    "WORKSPACE folder and its file list (if shown above), any ATTACHED FILES included in the "
+    "prompt, and the tools available to you. If a workspace or files are attached, you already "
+    "have access — investigate them rather than asking the user for clarification.\n"
     "When the user asks for file listings, file contents, directory structure, code search, or file operations, "
     "you MUST use the relevant tool IMMEDIATELY. "
     "NEVER explain how to use tools. NEVER describe what you would do. "
@@ -648,16 +652,23 @@ class RESTServer:
                         matches = [i.get("name") for i in files if i.get("name", "").lower().endswith("." + ext)]
                         filtered_blocks += f"[EXACT .{ext} FILES ({len(matches)}): {', '.join(matches) if matches else 'none'}]\n"
                     current_prompt = (
-                        f"[WORKSPACE: {workspace_folder}]\n"
+                        f"[ACTIVE WORKSPACE: {workspace_folder}]\n"
                         f"[FACTS — workspace root: {len(files)} files, {len(dirs)} folders]\n"
                         f"[FILE COUNTS BY EXTENSION: {counts_str}]\n"
                         f"{filtered_blocks}"
                         f"[COMPLETE FILE/FOLDER LIST: {names}]\n"
-                        "The FACTS and lists above are computed directly from the file system and "
-                        "are exact. When asked for files of a specific type, use the matching "
-                        "'EXACT .<ext> FILES' list verbatim — do NOT include folders or other file "
-                        "types. For counts, use the numbers above. Do NOT call a tool or recount.\n\n"
-                        f"{prompt_text}"
+                        "A workspace folder IS attached and its contents are listed above (exact, from "
+                        "the file system). You therefore HAVE access to these files.\n"
+                        "RULES:\n"
+                        "1. NEVER say the request is unclear or ask the user what to debug/review/analyze "
+                        "when a workspace is attached. Investigate it yourself.\n"
+                        "2. To debug/review/analyze/'check' the folder: READ the relevant files with "
+                        "[[MCP:file_explorer:{\"action\":\"read\",\"path\":\"<file>\"}]] (paths are relative "
+                        "to the workspace), and/or search with search_ripgrep, then report CONCRETE findings "
+                        "(actual bugs, file names, line references) — not generic advice.\n"
+                        "3. For 'which/how many files' questions, use the EXACT lists/counts above verbatim; "
+                        "do NOT include folders or recount.\n\n"
+                        f"USER REQUEST: {prompt_text}"
                     )
                     context_injected = True
             except Exception as e:
@@ -706,17 +717,10 @@ class RESTServer:
                     current_prompt = current_prompt[:MAX_PROMPT_LEN] + "\n\n[...truncated by backend]"
 
                 async with httpx.AsyncClient(timeout=600) as client:
-                    payload = {
-                        "model": model,
-                        "prompt": current_prompt,
-                        "stream": False,
-                    }
                     # Prepend the project-wide core instructions (Karpathy
                     # guidelines) to EVERY agent/preset, on every generation.
                     core = _load_core_instructions()
                     combined_system = (core + "\n\n" + full_system).strip() if core else full_system
-                    if combined_system:
-                        payload["system"] = combined_system
                     logger.info("[TOOL_TRACE] core_applied=%s combined_system_len=%s", bool(core), len(combined_system or ""))
 
                     options = {}
@@ -724,42 +728,51 @@ class RESTServer:
                         options["temperature"] = temperature
                     if context_length:
                         options["num_ctx"] = context_length
-                    # Cap output length. Without this, small models can ramble until
-                    # they fill the whole context window (thousands of tokens), which
-                    # takes minutes and trips the request timeout. Override via body.
+                    # Cap output length so small models can't ramble until they
+                    # fill the context window and trip the timeout. Override via body.
                     options["num_predict"] = body.get("max_tokens", 1024)
-                    payload["options"] = options
 
                     # Disable extended "thinking" for reasoning models (qwen3,
-                    # deepseek-r1, gpt-oss). Their hidden chain-of-thought burns
-                    # thousands of tokens and is the main cause of timeouts here.
+                    # deepseek-r1, gpt-oss) — their hidden CoT caused timeouts.
                     low = model.lower()
-                    if any(tag in low for tag in ("qwen3", "-r1", "r1:", "gpt-oss", "thinking")):
-                        payload["think"] = False
+                    think = False if any(tag in low for tag in ("qwen3", "-r1", "r1:", "gpt-oss", "thinking")) else None
 
-                    # Keep the model resident across tool iterations to avoid
-                    # reloading it from disk every round (the main source of latency).
-                    # The single explicit unload happens in the finally block below,
-                    # guaranteeing zero models loaded once this agent's turn ends.
-                    payload["keep_alive"] = "5m"
+                    # P1 — NATIVE TOOL CALLING. Offer the tool schemas via /api/chat
+                    # so capable models (qwen3*, cogito) return structured tool_calls.
+                    # Models without native support return text → regex fallback.
+                    tools_spec = mcp_cell.ollama_tools() if (tools_enabled and mcp_cell) else None
 
-                    logger.info("stage=B ollama_request iteration=%s prompt_len=%s system_len=%s", iteration, len(current_prompt), len(full_system or ""))
-                    logger.info("[OLLAMA_BODY] model=%s num_predict=%s temperature=%s context_length=%s keep_alive=%s think=%s",
-                                payload.get("model"), options.get("num_predict"), options.get("temperature"), context_length, payload.get("keep_alive"), payload.get("think"))
+                    chat_payload = {
+                        "model": model,
+                        "messages": (
+                            ([{"role": "system", "content": combined_system}] if combined_system else [])
+                            + [{"role": "user", "content": current_prompt}]
+                        ),
+                        "stream": False,
+                        # Keep the model resident across tool iterations; the single
+                        # unload happens once in the finally block.
+                        "keep_alive": "5m",
+                        "options": options,
+                    }
+                    if think is not None:
+                        chat_payload["think"] = think
+                    if tools_spec:
+                        chat_payload["tools"] = tools_spec
+
+                    logger.info("stage=B ollama_request iteration=%s prompt_len=%s system_len=%s native_tools=%s",
+                                iteration, len(current_prompt), len(combined_system or ""), len(tools_spec or []))
+                    logger.info("[OLLAMA_BODY] model=%s num_predict=%s temperature=%s context_length=%s keep_alive=5m think=%s native_tools=%s",
+                                model, options.get("num_predict"), options.get("temperature"), context_length, think, bool(tools_spec))
                     _ollama_start = _time.time()
                     recorder.record_timeline("Agent-A", "ollama_request")
                     recorder.record_agent_reasoning(
-                        agent="Agent-A",
-                        prompt_length=len(current_prompt),
-                        model=model,
-                        tools_detected=len(self._extract_tool_calls(current_prompt)),
-                        tools_executed=0,
-                        response_length=0,
+                        agent="Agent-A", prompt_length=len(current_prompt), model=model,
+                        tools_detected=0, tools_executed=0, response_length=0,
                     )
 
                     res = await client.post(
-                        f"{settings.ollama_host}/api/generate",
-                        json=payload,
+                        f"{settings.ollama_host}/api/chat",
+                        json=chat_payload,
                         timeout=600,
                     )
                     _ollama_ms = (_time.time() - _ollama_start) * 1000
@@ -773,9 +786,11 @@ class RESTServer:
                             "model": model,
                         }
                     data = res.json()
-                    response_text = data.get("response", "").strip()
-                    logger.info("stage=B model_response_len=%s", len(response_text))
-                    if not response_text:
+                    msg = data.get("message", {}) or {}
+                    response_text = (msg.get("content") or "").strip()
+                    native_calls = self._native_tool_calls(msg.get("tool_calls"))
+                    logger.info("stage=B model_response_len=%s native_calls=%s", len(response_text), len(native_calls))
+                    if not response_text and not native_calls:
                         return {
                             "output": "[Model returned empty response — try again or check Ollama logs]",
                             "model": model,
@@ -787,8 +802,9 @@ class RESTServer:
                     if not tools_enabled or iteration >= MAX_TOOL_ITERATIONS:
                         break
 
-                    tool_calls = self._extract_tool_calls(response_text)
-                    logger.info("[TOOL_TRACE] stage=C extracted_tool_count=%s", len(tool_calls))
+                    # Prefer native structured tool calls; fall back to regex on text.
+                    tool_calls = native_calls or self._extract_tool_calls(response_text)
+                    logger.info("[TOOL_TRACE] stage=C extracted_tool_count=%s (native=%s)", len(tool_calls), len(native_calls))
 
                     # PHASE 7 — Force tool execution for explicit tool requests.
                     # Only on the first turn: once tools have run, the model must
@@ -836,16 +852,24 @@ class RESTServer:
 
                     all_tool_results.extend(tool_results)
 
-                    # Fast path: if every tool succeeded, synthesize a short
-                    # deterministic summary and skip another model round. This
-                    # prevents big-model continuation generations from timing
-                    # out (an 8B/14B model can take >5min to summarize on CPU)
-                    # and gives the user immediate confirmation of the action.
+                    # Fast path: only for TERMINAL side-effect actions whose
+                    # completion IS the answer (create/modify/run). A short
+                    # deterministic "Done." summary avoids a slow second model
+                    # round that can time out on 8B/14B models. For read/list/
+                    # search/fetch the result must FEED further reasoning, so we
+                    # let the model continue and actually analyze it.
+                    TERMINAL = {"write", "delete", "mkdir", "move"}
+                    def _is_terminal(tc):
+                        p = tc["call"]["preset"]
+                        a = tc["call"].get("args", {})
+                        if p == "file_explorer":
+                            return a.get("action") in TERMINAL
+                        return p in ("python_exec", "project_scaffold", "rollback_manager")
                     all_ok = all(
                         isinstance(r["result"], dict) and not r["result"].get("error")
                         for r in tool_results
                     )
-                    if all_ok:
+                    if all_ok and tool_results and all(_is_terminal(r) for r in tool_results):
                         final_response = self._summarize_tool_success(tool_results)
                         logger.info("[TOOL_TRACE] stage=F fast_path_summary len=%s", len(final_response))
                         break
@@ -981,6 +1005,25 @@ class RESTServer:
                 preview = json.dumps(res)[:160]
                 lines.append(f"- `{preset}` ok — {preview}")
         return "\n".join(lines)
+
+    def _native_tool_calls(self, raw) -> list:
+        """Convert Ollama /api/chat `message.tool_calls` into the internal
+        {preset, args, raw} shape used by the execution loop. Returns []
+        when the model returned no native tool calls."""
+        import json
+        calls = []
+        for tc in (raw or []):
+            fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+            name = fn.get("name")
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            if name:
+                calls.append({"preset": name, "args": args or {}, "raw": "[[native]]"})
+        return calls
 
     def _parse_args_block(self, block: str):
         """Parse the {...} body of a [[MCP:...]] call. Tries strict JSON first,

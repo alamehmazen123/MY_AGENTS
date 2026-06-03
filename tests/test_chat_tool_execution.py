@@ -56,12 +56,13 @@ def make_server(mcp_cell):
     return server
 
 
-def make_fake_httpx(response_text: str):
-    """Return a monkeypatch target that replaces httpx.AsyncClient."""
+def make_fake_httpx(response_text: str, tool_calls=None):
+    """Return a monkeypatch target that replaces httpx.AsyncClient.
+    Mimics Ollama /api/chat: {"message": {"content", "tool_calls"}}."""
     class FakeResponse:
         status_code = 200
         def json(self):
-            return {"response": response_text, "done": True}
+            return {"message": {"content": response_text, "tool_calls": tool_calls}, "done": True}
         def text(self):
             return ""
 
@@ -223,11 +224,11 @@ async def test_no_tools_flag_disables_forced_detection(monkeypatch):
 
 
 def make_recording_httpx(response_text: str, posts: list):
-    """FakeClient that records every /api/generate payload it receives."""
+    """FakeClient that records every /api/chat payload it receives."""
     class FakeResponse:
         status_code = 200
         def json(self):
-            return {"response": response_text, "done": True}
+            return {"message": {"content": response_text, "tool_calls": None}, "done": True}
         def text(self):
             return ""
 
@@ -239,7 +240,9 @@ def make_recording_httpx(response_text: str, posts: list):
         async def __aexit__(self, *args):
             pass
         async def post(self, url, *args, **kwargs):
-            if "generate" in str(url):
+            # Record both the main /api/chat call and the final /api/generate
+            # unload so the test can assert the single end-of-turn unload.
+            if "chat" in str(url) or "generate" in str(url):
                 posts.append(kwargs.get("json", {}))
             return FakeResponse()
         async def get(self, *args, **kwargs):
@@ -265,7 +268,7 @@ async def test_generation_caps_output_and_keeps_model_resident(monkeypatch):
     # At least the main generate + the final unload generate were sent.
     assert len(posts) >= 2
     main_call = posts[0]
-    assert main_call["options"]["num_predict"] == 2048, "output must be capped"
+    assert main_call["options"]["num_predict"] == 1024, "output must be capped"
     assert main_call["keep_alive"] == "5m", "model must stay resident during the turn"
     # The last call is the explicit unload.
     assert posts[-1]["keep_alive"] == 0, "turn must end with a single unload"
@@ -358,12 +361,43 @@ async def test_core_instructions_reach_the_model(monkeypatch):
 
     await server._handle_prompt(FakeReq())
 
-    assert posts, "no generate call captured"
-    system = posts[0].get("system", "")
+    assert posts, "no chat call captured"
+    # System prompt now lives in the first chat message (role=system).
+    msgs = posts[0].get("messages", [])
+    system = next((m.get("content", "") for m in msgs if m.get("role") == "system"), "")
     # Distinctive phrases that exist ONLY in core_instructions.md (Karpathy guidelines).
     assert "Simplicity First" in system, f"core instructions missing from system prompt: {system[:200]}"
     assert "Surgical Changes" in system
     assert "Think Before Coding" in system
+
+
+@pytest.mark.asyncio
+async def test_native_tool_calls_are_executed(monkeypatch):
+    """P1: a native Ollama `message.tool_calls` must be executed (no regex)."""
+    mcp = FakeMCPCell()
+    server = make_server(mcp)
+    native = [{"function": {"name": "file_explorer", "arguments": {"action": "list", "path": "."}}}]
+    monkeypatch.setattr("httpx.AsyncClient", make_fake_httpx("", tool_calls=native))
+
+    class FakeReq:
+        async def json(self):
+            return {"prompt": "list files", "model": "dummy", "no_tools": False}
+
+    await server._handle_prompt(FakeReq())
+    assert any(i[0] == "file_explorer" and i[1].get("action") == "list" for i in mcp.invocations), \
+        f"native tool call must run, got {mcp.invocations}"
+
+
+def test_native_tool_calls_parser():
+    """Native tool_calls (incl. stringified args) convert to the internal shape."""
+    server = make_server(FakeMCPCell())
+    out = server._native_tool_calls([
+        {"function": {"name": "calculator", "arguments": {"expression": "2+2"}}},
+        {"function": {"name": "clock", "arguments": "{\"timezone\": \"Asia/Tokyo\"}"}},
+    ])
+    assert out[0]["preset"] == "calculator" and out[0]["args"]["expression"] == "2+2"
+    assert out[1]["preset"] == "clock" and out[1]["args"]["timezone"] == "Asia/Tokyo"
+    assert server._native_tool_calls(None) == []
 
 
 def test_resolve_workspace(tmp_path):

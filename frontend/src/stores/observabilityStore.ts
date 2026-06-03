@@ -59,7 +59,7 @@ const DEFAULT_METRICS: ObservabilityMetrics = {
   request_count: 0,
 }
 
-export const useObservabilityStore = create<ObservabilityState>((set) => ({
+export const useObservabilityStore = create<ObservabilityState>((set, get) => ({
   metrics: DEFAULT_METRICS,
   traces: [],
   failures: [],
