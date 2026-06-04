@@ -123,8 +123,13 @@ export const PRESETS: Record<PresetName, PresetConfig> = {
 
 export const HIGH_RISK_MODELS = ['deepseek-r1:8b', 'qwen2.5-coder:14b', 'gpt-oss:20b']
 
+// Sentinel: when an agent's model is AUTO_MODEL, pickModel() chooses the best
+// installed model per prompt (intent-aware, native-tools-aware, family-decorrelated).
+export const AUTO_MODEL = '🪄 Auto'
+
 // Baseline list; the live set is merged from /api/models at runtime (fetchModels).
 export const ALL_MODELS = [
+  AUTO_MODEL,
   'tinyllama',
   'qwen3:1.7b',
   'qwen3:4b',
@@ -142,45 +147,128 @@ export type ModelTier = 'Weak' | 'Moderate' | 'Strong' | 'Very Strong'
 export interface ModelMeta {
   tier: ModelTier
   note: string
+  // Native function/tool-calling support via Ollama /api/chat:
+  //  'native' = returns structured tool_calls (verified); best for tool tasks.
+  //  'text'   = ignores the tools param, emits calls as text (works via our
+  //             regex fallback, but slower & less reliable).
+  //  'unknown'= not verified on this machine.
+  tools: 'native' | 'text' | 'unknown'
+  // Rough speed on a CPU-only box.
+  speed: 'fast' | 'medium' | 'slow' | 'very slow'
 }
 
-// Explicit notes for known local models. Anything not listed falls back to a
-// size-based heuristic in modelMeta() below.
+// Explicit notes for known local models. `tools` reflects a real probe of
+// Ollama /api/chat on this machine (see PLAN.md). Anything not listed falls
+// back to a size-based heuristic in modelMeta() below.
 const MODEL_NOTES: Record<string, ModelMeta> = {
-  'tinyllama': { tier: 'Weak', note: 'tiny 1.1B — testing / very simple chat only' },
-  'qwen3:1.7b': { tier: 'Weak', note: '1.7B — quick, simple Q&A' },
-  'deepseek-coder:1.3b': { tier: 'Weak', note: '1.3B coder — short snippets, fast' },
-  'deepseek-coder:latest': { tier: 'Weak', note: '1.3B coder — short snippets, fast' },
-  'qwen2.5-coder:3b': { tier: 'Moderate', note: '3B coder — everyday code, fast' },
-  'qwen3:4b': { tier: 'Moderate', note: '4B — balanced general tasks' },
-  'qwen3:8b': { tier: 'Strong', note: '8B — solid reasoning & review' },
-  'cogito:8b': { tier: 'Strong', note: '8B Cogito v1 — hybrid reasoning, instruction-tuned' },
-  'deepseek-r1:8b': { tier: 'Strong', note: '8B reasoning — capable but slower' },
-  'qwen2.5-coder:7b': { tier: 'Strong', note: '7B coder — strong code gen & review' },
-  'deepseek-coder:6.7b': { tier: 'Strong', note: '6.7B coder — good code review' },
-  'llama3:8b': { tier: 'Strong', note: '8B — strong general chat' },
-  'llama3:latest': { tier: 'Strong', note: '8B — strong general chat' },
-  'qwen2.5-coder:14b': { tier: 'Very Strong', note: '14B coder — best code, slow on CPU' },
-  'phi4:14b': { tier: 'Very Strong', note: '14B — strong reasoning, slow on CPU' },
-  'gpt-oss:20b': { tier: 'Very Strong', note: '20B — most capable, very slow on CPU' },
+  'tinyllama': { tier: 'Weak', tools: 'unknown', speed: 'fast',
+    note: '1.1B. Toy/testing model — very simple chat only; unreliable for real tasks.' },
+  'qwen3:1.7b': { tier: 'Weak', tools: 'unknown', speed: 'fast',
+    note: '1.7B. Quick simple Q&A. Too small for multi-step or tool work.' },
+  'deepseek-coder:1.3b': { tier: 'Weak', tools: 'text', speed: 'fast',
+    note: '1.3B coder. Fast for short snippets. No native tool-calling — weak on agent/file tasks.' },
+  'deepseek-coder:latest': { tier: 'Weak', tools: 'text', speed: 'fast',
+    note: '1.3B coder. Fast for short snippets. No native tool-calling — weak on agent/file tasks.' },
+  'qwen2.5-coder:3b': { tier: 'Moderate', tools: 'text', speed: 'fast',
+    note: '3B coder. Fast, decent everyday code. ⚠️ No native tool-calling — slower & less reliable on file/tool tasks.' },
+  'qwen3:4b': { tier: 'Moderate', tools: 'native', speed: 'medium',
+    note: '4B. ✅ Native tool-calling. Good balanced Agent-A for tool tasks; can be chatty.' },
+  'qwen3:8b': { tier: 'Strong', tools: 'native', speed: 'medium',
+    note: '8B. ✅ Native tool-calling. Best all-round Agent-A / reviewer; solid reasoning.' },
+  'cogito:8b': { tier: 'Strong', tools: 'native', speed: 'medium',
+    note: '8B hybrid reasoner. ✅ Native tool-calling. Strong for tool-driven agent work.' },
+  'deepseek-r1:8b': { tier: 'Strong', tools: 'unknown', speed: 'slow',
+    note: '8B reasoning. Capable but slow (heavy chain-of-thought). Better for analysis than live tool loops.' },
+  'qwen2.5-coder:7b': { tier: 'Strong', tools: 'text', speed: 'medium',
+    note: '7B coder. Strong code gen & review. No native tool-calling — relies on text fallback for tools.' },
+  'deepseek-coder:6.7b': { tier: 'Strong', tools: 'unknown', speed: 'medium',
+    note: '6.7B coder. Good code review. Heavier to cold-load; verify tool use before relying on it.' },
+  'llama3:8b': { tier: 'Strong', tools: 'unknown', speed: 'medium',
+    note: '8B. Strong general chat & writing. Tool-calling not verified here.' },
+  'llama3:latest': { tier: 'Strong', tools: 'unknown', speed: 'medium',
+    note: '8B. Strong general chat & writing. Tool-calling not verified here.' },
+  'qwen2.5-coder:14b': { tier: 'Very Strong', tools: 'text', speed: 'slow',
+    note: '14B coder. Best code quality. ⚠️ No native tool-calling AND slow on CPU — great reviewer, poor live-tool agent.' },
+  'phi4:14b': { tier: 'Very Strong', tools: 'unknown', speed: 'slow',
+    note: '14B. Strong reasoning, slow on CPU. Best as a deep reviewer, not a fast doer.' },
+  'gpt-oss:20b': { tier: 'Very Strong', tools: 'unknown', speed: 'very slow',
+    note: '20B. Most capable but very slow on CPU — expect long waits per turn.' },
 }
 
 export function modelMeta(name: string): ModelMeta {
   if (MODEL_NOTES[name]) return MODEL_NOTES[name]
-  // Heuristic: parse the parameter size from the tag (e.g. ":7b", "-1.3b").
+  // Heuristic for models not in the table: size from the tag (e.g. ":7b").
   const m = name.match(/(\d+(?:\.\d+)?)\s*b\b/i)
   const size = m ? parseFloat(m[1]) : 0
   const coder = /coder|code/i.test(name)
-  if (size === 0) return { tier: 'Moderate', note: 'unknown size — test before relying on it' }
-  if (size < 2) return { tier: 'Weak', note: `${size}B — simple tasks only` }
-  if (size < 5) return { tier: 'Moderate', note: `${size}B${coder ? ' coder' : ''} — everyday tasks` }
-  if (size < 10) return { tier: 'Strong', note: `${size}B${coder ? ' coder' : ''} — capable` }
-  return { tier: 'Very Strong', note: `${size}B${coder ? ' coder' : ''} — heavy, slow on CPU` }
+  const c = coder ? ' coder' : ''
+  if (size === 0) return { tier: 'Moderate', tools: 'unknown', speed: 'medium', note: 'Unknown size — test tool use & speed before relying on it.' }
+  if (size < 2) return { tier: 'Weak', tools: 'unknown', speed: 'fast', note: `${size}B${c}. Simple tasks only; too small for tool/agent work.` }
+  if (size < 5) return { tier: 'Moderate', tools: 'unknown', speed: 'fast', note: `${size}B${c}. Everyday tasks, fast. Verify tool-calling support.` }
+  if (size < 10) return { tier: 'Strong', tools: 'unknown', speed: 'medium', note: `${size}B${c}. Capable all-rounder. Verify tool-calling support.` }
+  return { tier: 'Very Strong', tools: 'unknown', speed: 'slow', note: `${size}B${c}. High quality but slow on CPU.` }
 }
 
 export function modelLabel(name: string): string {
+  if (name === AUTO_MODEL) return `${AUTO_MODEL}  ·  picks the best installed model per prompt`
   const meta = modelMeta(name)
   return `${name}  ·  ${meta.tier} — ${meta.note}`
+}
+
+// ── 🪄 Auto model router ───────────────────────────────────────────────────
+// Classify the prompt and pick the best-suited INSTALLED model. Fixes the #1
+// recurring failure: the wrong model for the task (timeouts / hallucination).
+type Intent = 'plan' | 'tool' | 'chat'
+
+function classifyIntent(prompt: string, hasFolder: boolean): Intent {
+  const low = (prompt || '').toLowerCase()
+  if (/(make a plan|improvement (list|plan)|how to improve|improve (this|the|my)|refactor plan|review (the|this) project|plan to improve|audit the project|analyze the project|make it (more professional|better))/.test(low)) {
+    return 'plan'
+  }
+  if (hasFolder ||
+      /\b(file|files|folder|directory|read|write|list|search|grep|code|coding|script|\.py|\.ts|\.tsx|\.js|\.md|\.json|\.csv|\.pdf|git|run |execute|debug|refactor|create (a|the)|build|fix|weather|wikipedia|ip address|calculate|compute|fetch|download|screenshot|sql|database)\b/.test(low)) {
+    return 'tool'
+  }
+  return 'chat'
+}
+
+const familyOf = (m: string) => (m || '').split(':')[0]
+
+// Preference orders (best first) per use-case; filtered by what's installed.
+const PREF_TOOL = ['qwen3:8b', 'cogito:8b', 'qwen3:4b', 'qwen2.5-coder:7b', 'qwen2.5-coder:14b', 'llama3:8b', 'qwen2.5-coder:3b']
+const PREF_CHAT = ['qwen3:1.7b', 'qwen2.5-coder:3b', 'qwen3:4b', 'llama3:8b', 'qwen3:8b']
+const PREF_REVIEWER = ['cogito:8b', 'qwen3:8b', 'deepseek-coder:6.7b', 'qwen2.5-coder:7b', 'llama3:8b', 'qwen2.5-coder:14b', 'qwen3:4b']
+
+function firstInstalled(pref: string[], installed: string[], avoidFamily?: string): string | undefined {
+  // First pass: honor avoidFamily (decorrelate reviewer from doer).
+  if (avoidFamily) {
+    const diff = pref.find((m) => installed.includes(m) && familyOf(m) !== avoidFamily)
+    if (diff) return diff
+  }
+  return pref.find((m) => installed.includes(m))
+}
+
+// Resolve a model that may be AUTO_MODEL into a concrete installed model.
+export function pickModel(
+  raw: string,
+  prompt: string,
+  role: 'A' | 'B',
+  available: string[],
+  hasFolder: boolean,
+  peerModel?: string,
+): string {
+  if (raw !== AUTO_MODEL) return raw
+  const installed = available.filter((m) => m !== AUTO_MODEL)
+  if (installed.length === 0) return 'qwen3:4b' // sane fallback
+  const intent = classifyIntent(prompt, hasFolder)
+  if (role === 'B') {
+    // Reviewer: strong model, ideally a DIFFERENT family than Agent-A.
+    return firstInstalled(PREF_REVIEWER, installed, peerModel ? familyOf(peerModel) : undefined)
+      || installed[0]
+  }
+  // Agent-A (doer)
+  const pref = intent === 'chat' ? PREF_CHAT : PREF_TOOL
+  return firstInstalled(pref, installed) || installed[0]
 }
 
 const MCP_PRESETS = [
@@ -225,6 +313,7 @@ interface SettingsState {
   systemPromptA: string
   systemPromptB: string
   contextLength: number
+  permissionMode: 'auto' | 'ask'
   mcpToolsEnabled: boolean
   availableModels: string[]
   mcpEnabled: Record<string, boolean>
@@ -237,6 +326,7 @@ interface SettingsState {
   setSystemPromptA: (v: string) => void
   setSystemPromptB: (v: string) => void
   setContextLength: (v: number) => void
+  setPermissionMode: (m: 'auto' | 'ask') => void
   setMcpToolsEnabled: (v: boolean) => void
   setMcpEnabled: (name: string, enabled: boolean) => void
   fetchModels: () => Promise<void>
@@ -249,14 +339,17 @@ export const useSettingsStore = create<SettingsState>((set, get) => {
   const defaults = PRESETS.CODING
   const initial: SettingsState = {
     theme: 'dark',
-    preset: 'CODING',
-    agentAModel: defaults.agentA.name,
-    agentBModel: defaults.agentB?.name || '',
+    preset: 'CUSTOM',
+    // Default to 🪄 Auto for both agents — the router picks the best installed
+    // model per prompt (and a different-family reviewer). Removes the #1 user error.
+    agentAModel: AUTO_MODEL,
+    agentBModel: AUTO_MODEL,
     temperatureA: defaults.agentA.temperature,
     temperatureB: defaults.agentB?.temperature ?? 0.3,
     systemPromptA: defaults.agentA.systemPrompt,
     systemPromptB: defaults.agentB?.systemPrompt ?? '',
     contextLength: defaults.agentA.contextLength,
+    permissionMode: 'auto',
     mcpToolsEnabled: defaults.mcpToolsEnabled,
     availableModels: ALL_MODELS,
     mcpEnabled: { ...defaultMcpEnabled },
@@ -293,6 +386,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => {
     setSystemPromptA: (systemPromptA) => set({ systemPromptA, preset: 'CUSTOM' }),
     setSystemPromptB: (systemPromptB) => set({ systemPromptB, preset: 'CUSTOM' }),
     setContextLength: (contextLength) => set({ contextLength, preset: 'CUSTOM' }),
+    setPermissionMode: (permissionMode) => set({ permissionMode }),
     setMcpToolsEnabled: (mcpToolsEnabled) => set({ mcpToolsEnabled, preset: 'CUSTOM' }),
 
     setMcpEnabled: (name, enabled) =>
@@ -349,6 +443,7 @@ if (typeof window !== 'undefined') {
         systemPromptA: state.systemPromptA,
         systemPromptB: state.systemPromptB,
         contextLength: state.contextLength,
+        permissionMode: state.permissionMode,
         mcpToolsEnabled: state.mcpToolsEnabled,
         mcpEnabled: state.mcpEnabled,
       }

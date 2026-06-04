@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { useSettingsStore } from './settingsStore'
+import { useSettingsStore, pickModel } from './settingsStore'
 
 export interface AgentMessage {
   id: string
@@ -14,6 +14,8 @@ export interface AgentState {
   messages: AgentMessage[]
   status: 'idle' | 'online' | 'working' | 'waiting' | 'paused' | 'disabled'
   model: string
+  // When model is 🪄 Auto, the concrete model the router picked for the last turn.
+  resolvedModel?: string
 }
 
 export interface AttachedFile {
@@ -86,6 +88,8 @@ async function callOllama(
     temperature?: number
     contextLength?: number
     signal?: AbortSignal
+    agent?: 'A' | 'B'
+    onToken?: (delta: string) => void
   }
 ): Promise<{ text: string; toolContext: string; toolResults: any[]; traceId?: string }> {
   const controller = new AbortController()
@@ -110,6 +114,7 @@ async function callOllama(
 
     const settings = useSettingsStore.getState()
     body.preset = settings.preset
+    body.permission_mode = settings.permissionMode
 
     // Force structured markdown output for every preset EXCEPT plain CHAT — so
     // answers come back as bullet points, headings, and fenced code blocks
@@ -123,42 +128,122 @@ async function callOllama(
         'into prose. Be structured; do not write a wall of plain text.'
     }
 
+    // Pass session/agent context so the backend persists the run correctly.
+    body.session_id = useSessionStore.getState().activeSessionId
+    body.agent = opts?.agent || 'A'
+
     console.log(
-      '[SESSION_STORE_TRACE] sending /api/prompt body=',
-      JSON.stringify({ preset: body.preset, model: body.model, no_tools: body.no_tools, enableTools: opts?.enableTools, system_len: body.system?.length, prompt_preview: body.prompt?.slice(0, 80) })
+      '[SESSION_STORE_TRACE] starting run',
+      JSON.stringify({ preset: body.preset, model: body.model, agent: body.agent, prompt_preview: body.prompt?.slice(0, 80) })
     )
 
-    const res = await fetch('/api/prompt', {
+    // ── Async Run + SSE (Phase A/B/C) ──
+    // The backend enqueues the turn and returns a run_id INSTANTLY, so the HTTP
+    // request can never time out. We then stream the run's events over SSE; the
+    // work is persisted server-side and survives reload/restart. EventSource
+    // auto-reconnects with Last-Event-ID, giving free resume.
+    const startRes = await fetch('/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: controller.signal,
     })
     clearTimeout(timeoutId)
-    if (!res.ok) {
-      const err = await res.text()
-      throw new Error(err || `HTTP ${res.status}`)
-    }
-    const data = await res.json()
-    if (data.error) {
-      return { text: `[Error: ${data.error}] ${data.output || ''}`, toolContext: '', toolResults: [] }
-    }
-    return {
-      text: data.output || '[No response from model]',
-      toolContext: data.tool_context || '',
-      toolResults: data.tool_results || [],
-      traceId: data.trace_id,
-    }
+    if (!startRes.ok) throw new Error((await startRes.text()) || `HTTP ${startRes.status}`)
+    const { run_id } = await startRes.json()
+    if (!run_id) throw new Error('no run_id returned')
+
+    return await new Promise((resolve) => {
+      const es = new EventSource(`/api/run/${run_id}/stream`)
+      let settled = false
+      const finish = (val: any) => {
+        if (settled) return
+        settled = true
+        es.close()
+        resolve(val)
+      }
+
+      const onAbort = () => finish({ text: '[Stopped by user]', toolContext: '', toolResults: [] })
+      opts?.signal?.addEventListener('abort', onAbort, { once: true })
+
+      es.addEventListener('token', (e: any) => {
+        try {
+          const d = JSON.parse(e.data)
+          if (d.t && opts?.onToken) opts.onToken(d.t)
+        } catch { /* ignore */ }
+      })
+      es.addEventListener('tool_started', (e: any) => {
+        try {
+          const d = JSON.parse(e.data)
+          useSessionStore.setState({ unloadStatus: `🔧 ${d.tool}…` })
+        } catch { /* ignore */ }
+      })
+      es.addEventListener('done', (e: any) => {
+        try {
+          const d = JSON.parse(e.data)
+          if (d.error) {
+            finish({ text: `[Error: ${d.error}] ${d.output || ''}`, toolContext: '', toolResults: [] })
+          } else {
+            finish({
+              text: d.output || '[No response from model]',
+              toolContext: d.tool_context || '',
+              toolResults: d.tool_results || [],
+            })
+          }
+        } catch {
+          finish({ text: '[Error: malformed run result]', toolContext: '', toolResults: [] })
+        }
+      })
+      es.addEventListener('error', (e: any) => {
+        // A typed `error` event carries data; a transport error does not (EventSource
+        // will auto-reconnect with Last-Event-ID, so don't kill the stream for those).
+        if (e?.data) {
+          try { finish({ text: `[Error: ${JSON.parse(e.data).error}]`, toolContext: '', toolResults: [] }) }
+          catch { finish({ text: '[Error during run]', toolContext: '', toolResults: [] }) }
+        }
+      })
+      es.addEventListener('close', () => {
+        // Terminal status with no done payload (rare) — fall back to the run record.
+        if (!settled) {
+          fetch(`/api/run/${run_id}`).then((r) => r.json()).then((run) => {
+            finish({ text: run?.partial_output || '[Run ended]', toolContext: '', toolResults: [] })
+          }).catch(() => finish({ text: '[Run ended]', toolContext: '', toolResults: [] }))
+        }
+      })
+    })
   } catch (e: any) {
     clearTimeout(timeoutId)
-    if (e.name === 'AbortError') {
-      if (opts?.signal?.aborted) {
-        return { text: '[Stopped by user]', toolContext: '', toolResults: [] }
-      }
-      return { text: '[Error: Request timed out. The model may be overloaded or Ollama is not responding.]', toolContext: '', toolResults: [] }
+    if (e.name === 'AbortError' && opts?.signal?.aborted) {
+      return { text: '[Stopped by user]', toolContext: '', toolResults: [] }
     }
     return { text: `[Error: ${e.message}]`, toolContext: '', toolResults: [] }
   }
+}
+
+// Append an empty streaming agent message to a panel and return its id, so
+// tokens can be rendered live as they arrive over SSE.
+function pushStreamingMessage(agent: 'A' | 'B'): string {
+  const id = makeId()
+  const key = agent === 'A' ? 'agentA' : 'agentB'
+  useSessionStore.setState((s) => ({
+    sessions: s.sessions.map((sess) =>
+      sess.id === s.activeSessionId
+        ? { ...sess, [key]: { ...sess[key], messages: [...sess[key].messages, { id, role: 'agent', text: '', streaming: true, timestamp: Date.now() }] } }
+        : sess
+    ),
+  }))
+  return id
+}
+
+function updateStreamingMessage(agent: 'A' | 'B', id: string, text: string, streaming: boolean) {
+  const key = agent === 'A' ? 'agentA' : 'agentB'
+  useSessionStore.setState((s) => ({
+    sessions: s.sessions.map((sess) =>
+      sess.id === s.activeSessionId
+        ? { ...sess, [key]: { ...sess[key], messages: sess[key].messages.map((m) => (m.id === id ? { ...m, text, streaming } : m)) } }
+        : sess
+    ),
+  }))
 }
 
 async function verifyZeroModels(): Promise<{ ok: boolean; status: string }> {
@@ -404,9 +489,20 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
       set({ isGenerating: true, unloadStatus: `Executing Agent-${agent} plan...` })
 
+      // In Planning Mode the agent emits an "## Executable Plan" section holding
+      // the tool calls — prefer that so we run exactly those (not example calls
+      // that may appear in the prose), still scoped to the attached folder.
+      const executableSection = (t?: string) => {
+        if (!t) return undefined
+        const i = t.search(/##\s*Executable Plan/i)
+        return i >= 0 ? t.slice(i) : undefined
+      }
+
       try {
         // ── PASS 1: passive extraction from the existing texts. ──
-        const plan = [targetMsg?.text, otherMsg?.text].filter(Boolean).join('\n\n')
+        const plan =
+          [executableSection(targetMsg?.text), executableSection(otherMsg?.text)].filter(Boolean).join('\n\n') ||
+          [targetMsg?.text, otherMsg?.text].filter(Boolean).join('\n\n')
         const res = await fetch('/api/execute-plan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -418,10 +514,11 @@ export const useSessionStore = create<SessionState>((set, get) => {
         // ── PASS 2: if nothing to run, ASK the agent to actually do the work. ──
         if (steps.length === 0) {
           set({ unloadStatus: `Asking Agent-${agent} to generate an executable plan...` })
-          const model =
-            agent === 'A'
-              ? session.agentA.model || settings.agentAModel
-              : session.agentB.model || settings.agentBModel
+          const rawExec = agent === 'A'
+            ? session.agentA.model || settings.agentAModel
+            : session.agentB.model || settings.agentBModel
+          // Execution is always a tool task → resolve Auto with hasFolder=true.
+          const model = pickModel(rawExec, originalRequest || 'run tools', agent, settings.availableModels, true)
           const seedAnswer = targetMsg?.text || otherMsg?.text || ''
           const execPrompt =
             `ORIGINAL USER REQUEST:\n"""${originalRequest}"""\n\n` +
@@ -480,9 +577,9 @@ export const useSessionStore = create<SessionState>((set, get) => {
       const session = state.sessions.find((s) => s.id === state.activeSessionId)
       if (!session) return
       const settings = useSettingsStore.getState()
-      const agentAModel = session.agentA.model || settings.agentAModel
-      const agentBModel = session.agentB.model || settings.agentBModel
-      const isBEnabled = !!agentBModel && settings.preset !== 'CHAT'
+      const rawA = session.agentA.model || settings.agentAModel
+      const rawB = session.agentB.model || settings.agentBModel
+      const isBEnabled = !!rawB && settings.preset !== 'CHAT'
 
       // Use the most recent agent response as the seed for the revision. If
       // Agent-B has spoken, use B; otherwise the most recent A message.
@@ -490,6 +587,11 @@ export const useSessionStore = create<SessionState>((set, get) => {
       const lastA = session.agentA.messages.filter((m) => m.role === 'agent').pop()
       const seed = (lastB?.text || lastA?.text || '').trim()
       if (!seed) return
+
+      // Resolve 🪄 Auto. Revision is a reasoning/tool task → hasFolder true.
+      const lastUser = session.agentA.messages.filter((m) => m.role === 'user').pop()?.text || seed
+      const agentAModel = pickModel(rawA, lastUser, 'A', settings.availableModels, true)
+      const agentBModel = pickModel(rawB, lastUser, 'B', settings.availableModels, true, agentAModel)
 
       const abortCtrl = new AbortController()
       currentAbortController = abortCtrl
@@ -576,6 +678,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
           temperature: settings.temperatureB,
           contextLength: settings.contextLength,
           signal: abortCtrl.signal,
+          agent: 'B',
         })
 
         if (isAborted() || bResult.text === '[Stopped by user]') {
@@ -642,11 +745,15 @@ export const useSessionStore = create<SessionState>((set, get) => {
       const settings = useSettingsStore.getState()
       const files = opts.files ?? session.attachedFiles
       const folder = opts.folder ?? session.workspaceFolder
-      // The model shown in the panel header IS the model we send (session is the
-      // source of truth; settings is only a fallback for a brand-new session).
-      const agentAModel = session.agentA.model || settings.agentAModel
-      const agentBModel = session.agentB.model || settings.agentBModel
-      const isBEnabled = !!agentBModel && settings.preset !== 'CHAT'
+      // Session is the source of truth (settings is the fallback for a new session).
+      const rawA = session.agentA.model || settings.agentAModel
+      const rawB = session.agentB.model || settings.agentBModel
+      const isBEnabled = !!rawB && settings.preset !== 'CHAT'
+      // 🪄 Auto: resolve to the best installed model for THIS prompt (and a
+      // different-family reviewer). Non-Auto models pass through unchanged.
+      const avail = settings.availableModels
+      const agentAModel = pickModel(rawA, text, 'A', avail, !!folder)
+      const agentBModel = pickModel(rawB, text, 'B', avail, !!folder, agentAModel)
 
       const fullPrompt = buildPrompt(text, files, folder)
 
@@ -665,12 +772,14 @@ export const useSessionStore = create<SessionState>((set, get) => {
         ...session.agentA,
         messages: [...session.agentA.messages, userMsg],
         status: 'working',
-        model: agentAModel,
+        model: rawA,                 // keep 🪄 Auto sticky
+        resolvedModel: agentAModel,  // the concrete model the router chose
       }
       const updatedB: AgentState = {
         ...session.agentB,
         status: isBEnabled ? 'waiting' : 'disabled',
-        model: isBEnabled ? agentBModel : '',
+        model: isBEnabled ? rawB : '',
+        resolvedModel: isBEnabled ? agentBModel : undefined,
       }
       set((s) => ({
         sessions: s.sessions.map((sess) =>
@@ -687,6 +796,8 @@ export const useSessionStore = create<SessionState>((set, get) => {
         // Agent-A is the "doer" — it always has tool access (the whole point of a
         // Claude-Code-style agent). The MCP toggle only affects whether the user
         // can turn this off explicitly; by default A can read/write the workspace.
+        const streamIdA = pushStreamingMessage('A')
+        let accA = ''
         const aResult = await callOllama(fullPrompt, agentAModel, settings.systemPromptA, {
           workspaceFolder: folder,
           attachedFiles: files,
@@ -694,9 +805,13 @@ export const useSessionStore = create<SessionState>((set, get) => {
           temperature: settings.temperatureA,
           contextLength: settings.contextLength,
           signal: abortCtrl.signal,
+          onToken: (d) => { accA += d; updateStreamingMessage('A', streamIdA, accA, true) },
         })
         const responseA = aResult.text
         const toolContextA = aResult.toolContext
+        // Finalize the live message with the clean final output (which may differ
+        // from the raw streamed tokens, e.g. after a fast-path/synthesis summary).
+        updateStreamingMessage('A', streamIdA, responseA, false)
 
         if (isAborted() || responseA === '[Stopped by user]') {
           set((s) => {
@@ -730,15 +845,8 @@ export const useSessionStore = create<SessionState>((set, get) => {
           return
         }
 
-        const aDone: AgentState = {
-          ...updatedA,
-          messages: [
-            ...updatedA.messages,
-            { id: makeId(), role: 'agent', text: responseA, timestamp: Date.now(), traceId: aResult.traceId },
-          ],
-          status: 'online',
-        }
-
+        // The streaming placeholder already holds the final responseA — just
+        // flip status to online (no duplicate message).
         // Verify Agent-A unloaded
         const verifyA = await verifyZeroModels()
         set({ unloadStatus: `Agent-A done → ${verifyA.status}` })
@@ -746,7 +854,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
         if (!isBEnabled) {
           set((s) => ({
             sessions: s.sessions.map((sess) =>
-              sess.id === s.activeSessionId ? { ...sess, agentA: aDone } : sess
+              sess.id === s.activeSessionId ? { ...sess, agentA: { ...sess.agentA, status: 'online' } } : sess
             ),
           }))
           return
@@ -758,7 +866,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
         }
         set((s) => ({
           sessions: s.sessions.map((sess) =>
-            sess.id === s.activeSessionId ? { ...sess, agentA: aDone, agentB: bReady } : sess
+            sess.id === s.activeSessionId ? { ...sess, agentA: { ...sess.agentA, status: 'online' }, agentB: bReady } : sess
           ),
         }))
 
@@ -787,6 +895,8 @@ You are an INDEPENDENT senior reviewer. Do NOT simply agree with or repeat Agent
           'find and correct mistakes, and proactively investigate the workspace/attachments instead of ' +
           'asking the user for clarification. You never fabricate data.'
 
+        const streamIdB = pushStreamingMessage('B')
+        let accB = ''
         const bResult = await callOllama(reviewPrompt, agentBModel, reviewSystem, {
           workspaceFolder: folder,
           attachedFiles: files,
@@ -794,8 +904,11 @@ You are an INDEPENDENT senior reviewer. Do NOT simply agree with or repeat Agent
           temperature: settings.temperatureB,
           contextLength: settings.contextLength,
           signal: abortCtrl.signal,
+          agent: 'B',
+          onToken: (d) => { accB += d; updateStreamingMessage('B', streamIdB, accB, true) },
         })
         const responseB = bResult.text
+        updateStreamingMessage('B', streamIdB, responseB, false)
 
         if (isAborted() || responseB === '[Stopped by user]') {
           set((s) => {
@@ -826,23 +939,14 @@ You are an INDEPENDENT senior reviewer. Do NOT simply agree with or repeat Agent
           return
         }
 
-        const bDone: AgentState = {
-          ...bReady,
-          messages: [
-            ...bReady.messages,
-            { id: makeId(), role: 'context', text: `Agent-A said:\n${truncate(responseA, 800)}`, timestamp: Date.now() },
-            { id: makeId(), role: 'agent', text: responseB, timestamp: Date.now(), traceId: bResult.traceId },
-          ],
-          status: 'online',
-        }
-
+        // The streaming placeholder already holds the final responseB.
         // Verify Agent-B unloaded
         const verifyB = await verifyZeroModels()
         set({ unloadStatus: `Agent-B done → ${verifyB.status}` })
 
         set((s) => ({
           sessions: s.sessions.map((sess) =>
-            sess.id === s.activeSessionId ? { ...sess, agentB: bDone } : sess
+            sess.id === s.activeSessionId ? { ...sess, agentB: { ...sess.agentB, status: 'online' } } : sess
           ),
         }))
       } finally {

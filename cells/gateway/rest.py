@@ -117,6 +117,33 @@ TOOL_INSTRUCTIONS = (
     "\"C:\\\\\" or \"/\" — they are outside the workspace and will be rejected."
 )
 
+# Planning Mode — produces a grounded, two-part plan for an attached project.
+PLANNING_SYSTEM_PROMPT = (
+    "You are a senior engineer writing an improvement/refactor/review plan for a REAL "
+    "codebase. A CODE MAP of the actual project is provided in the user message — base "
+    "EVERYTHING on those real files and the stated project profile.\n"
+    "HARD RULES:\n"
+    "- NEVER invent files or reference any file not in the code map.\n"
+    "- Respect the project profile (e.g. do NOT call a web SPA a 'CLI').\n"
+    "- Be specific: name the actual files/functions from the map. No generic boilerplate "
+    "(skip CI/CD, community, CONTRIBUTING advice unless clearly relevant to THIS project).\n\n"
+    "Output ONLY the two sections below. Start your response IMMEDIATELY with the literal "
+    "text '## Comprehensive Plan'. Do NOT write any preamble, restate the request, or think "
+    "out loud (no 'We are given...', 'Let me...', 'First, let's understand...'). Just the plan.\n\n"
+    "## Comprehensive Plan\n"
+    "Grounded, concrete improvements grouped by theme, each naming the real file(s) it touches.\n\n"
+    "## Executable Plan\n"
+    "A single fenced code block containing ONLY MCP tool-call lines that carry out the first "
+    "concrete, SAFE steps — one per line, paths RELATIVE to the workspace, for example:\n"
+    "```\n"
+    "[[MCP:file_explorer:{\"action\":\"read\",\"path\":\"cells/gateway/rest.py\"}]]\n"
+    "[[MCP:search_ripgrep:{\"query\":\"TODO\",\"path\":\".\"}]]\n"
+    "```\n"
+    "Prefer reads/searches that gather facts before any edit. Include a write only when you "
+    "are confident of the exact new content. If nothing can be safely automated, leave the "
+    "block empty. The user will click 'Execute Plan' to run these on the project."
+)
+
 
 class RESTServer:
     """FastAPI REST server."""
@@ -134,6 +161,22 @@ class RESTServer:
         self._setup_routes()
         self._setup_static()
         self._server = None
+        # E — serialize generations so only ONE model runs at a time across all
+        # sessions/tabs (institutional one-model-at-a-time; OpenAI "Thread lock").
+        import asyncio as _asyncio
+        self._gen_lock = _asyncio.Lock()
+
+        # Phase D — crash recovery: mark runs orphaned by a previous crash as
+        # 'interrupted' (their partial output is preserved) when the app starts.
+        @self.app.on_event("startup")
+        async def _recover_runs():
+            try:
+                from plasma.run_store import run_store
+                n = run_store.recover_interrupted()
+                if n:
+                    logger.info("[RUN] recovered %s interrupted run(s) on startup", n)
+            except Exception as e:
+                logger.info("[RUN] recovery skipped: %s", e)
 
     def _setup_routes(self):
         # Observability middleware — injects trace_id into every request
@@ -210,6 +253,21 @@ class RESTServer:
         @self.app.post("/api/prompt")
         async def api_prompt(req: Request):
             return await self._handle_prompt(req)
+
+        # ── Async Run model (Phase A/B): non-blocking, persisted, streamable ──
+        @self.app.post("/api/run")
+        async def api_run(req: Request):
+            return await self._create_run(req)
+
+        @self.app.get("/api/run/{run_id}")
+        async def api_run_get(run_id: str):
+            from plasma.run_store import run_store
+            run = run_store.get_run(run_id)
+            return run or {"error": "run_not_found"}
+
+        @self.app.get("/api/run/{run_id}/stream")
+        async def api_run_stream(run_id: str, request: Request):
+            return await self._stream_run(run_id, request)
 
         @self.app.post("/api/pick-folder")
         async def pick_folder():
@@ -564,13 +622,23 @@ class RESTServer:
             return {"error": str(e)}
 
     async def _handle_prompt(self, req: Request):
+        """Synchronous endpoint (back-compat). Runs a turn and returns the result."""
+        body = await req.json()
+        return await self._run_turn(body)
+
+    async def _run_turn(self, body: dict, emit=None):
+        """Execute one agent turn. `emit(type, data)` is an optional callback used
+        by the background-run worker to persist streaming events (Phase A/B).
+        When emit is None this behaves exactly like the old synchronous path."""
         import httpx
         import re
         import json
         import time as _time
+        if emit is None:
+            def emit(_type, _data):
+                return None
         _prompt_start = _time.time()
         recorder.record_timeline("Gateway", "received_prompt")
-        body = await req.json()
         prompt_text = body.get("prompt", "")
         model = body.get("model", settings.ollama_default_model)
         system = body.get("system", DEFAULT_SYSTEM_PROMPT)
@@ -585,6 +653,9 @@ class RESTServer:
         temperature = body.get("temperature")
         context_length = body.get("context_length")
         preset_name = body.get("preset", "UNKNOWN")
+        # P5 — permission mode: "auto" runs everything; "ask" blocks destructive
+        # actions (delete / move / overwrite / shell rm) with a clear message.
+        permission_mode = body.get("permission_mode", "auto")
 
         if not prompt_text:
             return {"error": "empty_prompt", "output": "[Error: empty prompt received]"}
@@ -618,6 +689,20 @@ class RESTServer:
 
         current_prompt = prompt_text
         context_injected = False
+
+        # ── Planning Mode ── For "make a plan / improve / review the project" requests
+        # with a folder attached: inject a grounded CODE MAP (real files + symbols) and
+        # require a two-part answer (comprehensive prose + an executable [[MCP:...]] block
+        # that "Execute Plan" runs later). Tools are OFF here so the plan is emitted as
+        # text and NOT auto-executed during generation.
+        planning = bool(workspace_folder) and self._is_plan_request(prompt_text)
+        if planning:
+            code_map = self._build_code_map(workspace_folder)
+            full_system = PLANNING_SYSTEM_PROMPT
+            current_prompt = code_map + f"\n\nUSER REQUEST:\n{prompt_text}"
+            context_injected = True
+            tools_enabled = False
+            logger.info("[TOOL_TRACE] planning_mode=on code_map_len=%s", len(code_map))
 
         # Claude-Code-style environment awareness: when tools are on and a workspace
         # folder is set, give the agent a real listing of that folder up front so it
@@ -693,7 +778,9 @@ class RESTServer:
                             if isinstance(args.get(key), str) and not Path(args[key]).is_absolute():
                                 args[key] = str(wf / args[key])
                     logger.info("[TOOL_TRACE] stage=PRE preset=%s args=%s", tc["preset"], json.dumps(args))
-                    result = await mcp_cell.invoke(tc["preset"], args, workspace=workspace_folder or None)
+                    emit("tool_started", {"tool": tc["preset"], "args": args})
+                    result = await self._guarded_invoke(mcp_cell, tc["preset"], args, workspace_folder or None, permission_mode)
+                    emit("tool_result", {"tool": tc["preset"], "ok": not (isinstance(result, dict) and result.get("error"))})
                     pre_results.append({"call": tc, "result": result})
                     any_tool_executed = True
                 all_tool_results.extend(pre_results)
@@ -730,7 +817,8 @@ class RESTServer:
                         options["num_ctx"] = context_length
                     # Cap output length so small models can't ramble until they
                     # fill the context window and trip the timeout. Override via body.
-                    options["num_predict"] = body.get("max_tokens", 1024)
+                    # Plans are longer and structured, so give them more room.
+                    options["num_predict"] = body.get("max_tokens", 2560 if planning else 1024)
 
                     # Disable extended "thinking" for reasoning models (qwen3,
                     # deepseek-r1, gpt-oss) — their hidden CoT caused timeouts.
@@ -740,7 +828,13 @@ class RESTServer:
                     # P1 — NATIVE TOOL CALLING. Offer the tool schemas via /api/chat
                     # so capable models (qwen3*, cogito) return structured tool_calls.
                     # Models without native support return text → regex fallback.
-                    tools_spec = mcp_cell.ollama_tools() if (tools_enabled and mcp_cell) else None
+                    # E — curate the tool schemas to a relevant subset (core +
+                    # intent matches) instead of sending all 39 on every call.
+                    # Big schema payloads are the main slowdown for small/CPU models.
+                    tools_spec = (
+                        mcp_cell.ollama_tools(names=self._curate_tools(prompt_text))
+                        if (tools_enabled and mcp_cell) else None
+                    )
 
                     chat_payload = {
                         "model": model,
@@ -748,7 +842,8 @@ class RESTServer:
                             ([{"role": "system", "content": combined_system}] if combined_system else [])
                             + [{"role": "user", "content": current_prompt}]
                         ),
-                        "stream": False,
+                        # True token streaming — tokens are emitted live via SSE.
+                        "stream": True,
                         # Keep the model resident across tool iterations; the single
                         # unload happens once in the finally block.
                         "keep_alive": "5m",
@@ -770,25 +865,46 @@ class RESTServer:
                         tools_detected=0, tools_executed=0, response_length=0,
                     )
 
-                    res = await client.post(
-                        f"{settings.ollama_host}/api/chat",
-                        json=chat_payload,
-                        timeout=900,
-                    )
+                    # Stream the NDJSON chunks; emit each token live, accumulate
+                    # the full content and any native tool_calls.
+                    full_content = ""
+                    native_raw: list = []
+                    http_status = 200
+                    async with client.stream(
+                        "POST", f"{settings.ollama_host}/api/chat",
+                        json=chat_payload, timeout=900,
+                    ) as res:
+                        http_status = res.status_code
+                        if http_status == 200:
+                            async for line in res.aiter_lines():
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    chunk = json.loads(line)
+                                except Exception:
+                                    continue
+                                m = chunk.get("message", {}) or {}
+                                delta = m.get("content", "")
+                                if delta:
+                                    full_content += delta
+                                    emit("token", {"t": delta})
+                                if m.get("tool_calls"):
+                                    native_raw.extend(m["tool_calls"])
+                                if chunk.get("done"):
+                                    break
                     _ollama_ms = (_time.time() - _ollama_start) * 1000
                     recorder.record_timeline("Agent-A", "ollama_completed", _ollama_ms)
                     recorder.record_performance("ollama", _ollama_ms)
-                    if res.status_code != 200:
-                        logger.info("stage=G ollama_error status=%s", res.status_code)
+                    if http_status != 200:
+                        logger.info("stage=G ollama_error status=%s", http_status)
                         return {
-                            "error": f"ollama_http_{res.status_code}",
-                            "output": f"Ollama returned HTTP {res.status_code}: {res.text[:500]}",
+                            "error": f"ollama_http_{http_status}",
+                            "output": f"Ollama returned HTTP {http_status}",
                             "model": model,
                         }
-                    data = res.json()
-                    msg = data.get("message", {}) or {}
-                    response_text = (msg.get("content") or "").strip()
-                    native_calls = self._native_tool_calls(msg.get("tool_calls"))
+                    response_text = full_content.strip()
+                    native_calls = self._native_tool_calls(native_raw)
                     logger.info("stage=B model_response_len=%s native_calls=%s", len(response_text), len(native_calls))
                     if not response_text and not native_calls:
                         return {
@@ -833,8 +949,10 @@ class RESTServer:
                                             args[key] = str(wf / val)
 
                         logger.info("[TOOL_TRACE] stage=D dispatching_mcp preset=%s args=%s", tc["preset"], json.dumps(args))
+                        emit("tool_started", {"tool": tc["preset"], "args": args})
                         _mcp_start = _time.time()
-                        result = await mcp_cell.invoke(tc["preset"], args, workspace=workspace_folder or None)
+                        result = await self._guarded_invoke(mcp_cell, tc["preset"], args, workspace_folder or None, permission_mode)
+                        emit("tool_result", {"tool": tc["preset"], "ok": not (isinstance(result, dict) and result.get("error"))})
                         _mcp_ms = (_time.time() - _mcp_start) * 1000
                         _mcp_status = "SUCCESS" if (isinstance(result, dict) and not result.get("error")) else "FAILURE"
                         recorder.record_mcp_call(
@@ -871,7 +989,12 @@ class RESTServer:
                     )
                     if all_ok and tool_results and all(_is_terminal(r) for r in tool_results):
                         final_response = self._summarize_tool_success(tool_results)
-                        logger.info("[TOOL_TRACE] stage=F fast_path_summary len=%s", len(final_response))
+                        # P4 — auto-verify any Python files just written (compile-check).
+                        verify = await self._verify_python_writes(mcp_cell, tool_results, workspace_folder)
+                        if verify:
+                            final_response += "\n\n**Verification**\n" + verify
+                            emit("tool_result", {"tool": "verify", "ok": "❌" not in verify})
+                        logger.info("[TOOL_TRACE] stage=F fast_path_summary len=%s verify=%s", len(final_response), bool(verify))
                         break
 
                     current_prompt = self._build_continuation_prompt(base_prompt, response_text, tool_results)
@@ -953,6 +1076,92 @@ class RESTServer:
             ],
         }
 
+    async def _create_run(self, req: Request):
+        """Create a persisted Run and execute it in the background. Returns the
+        run_id IMMEDIATELY so the HTTP request never blocks (kills timeouts)."""
+        import asyncio
+        from plasma.run_store import run_store
+        body = await req.json()
+        run_id = run_store.create_run(
+            session_id=body.get("session_id", ""),
+            agent=body.get("agent", "A"),
+            model=body.get("model", settings.ollama_default_model),
+            prompt=body.get("prompt", ""),
+        )
+        asyncio.create_task(self._run_worker(run_id, body))
+        return {"run_id": run_id, "status": "queued"}
+
+    async def _run_worker(self, run_id: str, body: dict):
+        """Background worker: runs one agent turn, persisting status + events +
+        final output so the work survives client disconnect and backend restart."""
+        from plasma.run_store import run_store, RUNNING, COMPLETED, FAILED, EV_DONE, EV_ERROR
+        run_store.set_status(run_id, RUNNING)
+
+        def emit(type_, data):
+            try:
+                run_store.append_event(run_id, type_, data)
+            except Exception:
+                pass
+
+        try:
+            # Queue behind any other in-flight run so models never overlap.
+            async with self._gen_lock:
+                result = await self._run_turn(body, emit=emit)
+            output = result.get("output", "")
+            if output:
+                run_store.append_output(run_id, output)
+            emit(EV_DONE, {
+                "output": output,
+                "model": result.get("model"),
+                "tool_results": result.get("tool_results", []),
+                "tool_context": result.get("tool_context", ""),
+                "error": result.get("error"),
+            })
+            run_store.set_status(run_id, FAILED if result.get("error") else COMPLETED,
+                                 error=result.get("error"))
+        except Exception as e:
+            emit(EV_ERROR, {"error": str(e)})
+            run_store.set_status(run_id, FAILED, error=str(e))
+
+    async def _stream_run(self, run_id: str, request: Request):
+        """SSE stream of a run's events. Resumes from the `Last-Event-ID` header
+        (MDN SSE) by replaying persisted events with seq > last_id, then follows
+        live until the run reaches a terminal state. Heartbeats every ~15s."""
+        import asyncio
+        import json
+        from fastapi.responses import StreamingResponse
+        from plasma.run_store import run_store, TERMINAL
+
+        try:
+            last_id = int(request.headers.get("last-event-id", "0"))
+        except (ValueError, TypeError):
+            last_id = 0
+
+        async def gen():
+            cursor = last_id
+            last_beat = 0.0
+            import time as _t
+            while True:
+                events = run_store.events_since(run_id, cursor)
+                for ev in events:
+                    cursor = ev["seq"]
+                    yield f"id: {ev['seq']}\nevent: {ev['type']}\ndata: {json.dumps(ev['data'])}\n\n"
+                run = run_store.get_run(run_id)
+                if run and run["status"] in TERMINAL and not run_store.events_since(run_id, cursor):
+                    # Final flush done; close the stream.
+                    yield f"event: close\ndata: {json.dumps({'status': run['status']})}\n\n"
+                    return
+                if await request.is_disconnected():
+                    return
+                now = _t.time()
+                if now - last_beat > 15:
+                    last_beat = now
+                    yield f"event: heartbeat\ndata: {json.dumps({'ts': now})}\n\n"
+                await asyncio.sleep(0.3)
+
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     async def _unload_model_quiet(self, model: str):
         """Best-effort unload of a model from Ollama (keep_alive=0). Never raises."""
         import httpx
@@ -967,6 +1176,79 @@ class RESTServer:
                 )
         except Exception:
             pass
+
+    def _is_destructive(self, preset: str, args: dict) -> str:
+        """Return a human description if this tool call destroys/overwrites data,
+        else ''. Used by P5 'ask' mode to gate dangerous actions."""
+        a = args or {}
+        if preset == "file_explorer":
+            act = a.get("action")
+            if act == "delete":
+                return f"delete {a.get('path', '?')}"
+            if act == "move":
+                return f"move {a.get('path', '?')} → {a.get('dest', '?')}"
+            if act == "write":
+                return f"overwrite/create {a.get('path', '?')}"
+        if preset == "structured_terminal" and a.get("command") in ("rm", "mv", "cp"):
+            return f"{a.get('command')} {a.get('target', '?')}"
+        if preset == "rollback_manager" and a.get("action") == "restore":
+            return f"restore (overwrite) {a.get('path', '?')}"
+        if preset == "python_exec":
+            return "run arbitrary Python code"
+        return ""
+
+    async def _guarded_invoke(self, mcp_cell, preset, args, workspace, permission_mode):
+        """Invoke a tool, but in 'ask' mode refuse destructive actions with a
+        clear, structured result instead of executing them."""
+        if permission_mode == "ask":
+            desc = self._is_destructive(preset, args)
+            if desc:
+                logger.info("[TOOL_TRACE] permission_blocked preset=%s desc=%s", preset, desc)
+                return {
+                    "error": "requires_permission",
+                    "message": f"🔒 Blocked in Ask mode: would {desc}. Switch the permission "
+                               f"mode to Auto (Settings) to allow this action.",
+                    "blocked_action": desc,
+                    "preset": preset,
+                }
+        return await mcp_cell.invoke(preset, args, workspace=workspace)
+
+    async def _verify_python_writes(self, mcp_cell, tool_results: list, workspace_folder) -> str:
+        """P4 — Plan & verify: after the agent writes a .py file, compile-check it
+        so 'code written' means 'code that at least parses'. `compile()` only PARSES
+        (never executes), so it is safe to run in-process. Never raises."""
+        lines = []
+        for tr in tool_results:
+            call = tr.get("call", {})
+            res = tr.get("result", {})
+            args = call.get("args", {}) if isinstance(call, dict) else {}
+            if not (call.get("preset") == "file_explorer" and args.get("action") == "write"
+                    and isinstance(res, dict) and not res.get("error")):
+                continue
+            path = res.get("path") or args.get("path", "")
+            if not str(path).endswith(".py"):
+                continue
+            name = Path(str(path)).name
+            # Prefer the content we just wrote; fall back to reading it back.
+            content = args.get("content")
+            if content is None and mcp_cell:
+                try:
+                    rd = await mcp_cell.invoke("file_explorer", {"action": "read", "path": path},
+                                               workspace=workspace_folder or None)
+                    content = rd.get("content", "") if isinstance(rd, dict) else ""
+                except Exception:
+                    content = None
+            if content is None:
+                lines.append(f"- ⚠️ `{name}` could not be read for verification.")
+                continue
+            try:
+                compile(content, str(path), "exec")
+                lines.append(f"- ✅ `{name}` compiles cleanly.")
+            except SyntaxError as e:
+                lines.append(f"- ❌ `{name}` syntax error at line {e.lineno}: {e.msg}")
+            except Exception as e:
+                lines.append(f"- ⚠️ `{name}` verify error: {str(e)[:120]}")
+        return "\n".join(lines)
 
     def _summarize_tool_success(self, tool_results: list) -> str:
         """Build a short deterministic summary from successful tool results so
@@ -1005,6 +1287,135 @@ class RESTServer:
                 preview = json.dumps(res)[:160]
                 lines.append(f"- `{preset}` ok — {preview}")
         return "\n".join(lines)
+
+    # Always-available core tools (cheap, broadly useful).
+    _CORE_TOOLS = [
+        "file_explorer", "search_ripgrep", "python_exec",
+        "web_fetch", "network_info", "calculator", "clock",
+    ]
+    # Extra tools pulled in only when the prompt mentions a matching keyword.
+    _TOOL_TRIGGERS = {
+        "git_mcp": ("git", "commit", "branch", "diff "),
+        "wikipedia": ("wikipedia", "who is", "who was", "what is a", "biograph"),
+        "weather": ("weather", "forecast", "temperature in", "how hot", "how cold"),
+        "pdf_extract": (".pdf", "pdf"),
+        "office_reader": (".docx", ".xlsx", ".xlsm", "word doc", "excel", "spreadsheet"),
+        "sqlite_query": (".db", "sqlite", "sql query", "select ", "database"),
+        "csv_json": (".csv", ".json", "csv", "json file"),
+        "screenshot": ("screenshot", "capture screen", "screen shot"),
+        "qr_code": ("qr", "qr code"),
+        "convert_units": ("convert", "currency", "exchange rate", "miles", "kilomet", "celsius", "fahrenheit", "usd", "eur"),
+        "arxiv": ("arxiv", "research paper", "papers on", "academic paper"),
+        "memory": ("remember", "memorize", "recall", "note that", "save this"),
+        "diff_engine": ("diff", "compare files", "patch"),
+        "refactor_safe": ("refactor", "rename symbol", "rename variable"),
+        "dns_lookup": ("dns", "resolve host", "nslookup", "ip of"),
+        "html_to_markdown": ("html to", "readable text", "strip html", "article text"),
+        "process_monitor": ("cpu", "ram", "memory usage", "processes", "system load", "task manager"),
+        "project_scaffold": ("scaffold", "new project", "boilerplate", "template project"),
+        "rollback_manager": ("rollback", "snapshot", "undo change", "revert"),
+        "code_analyzer": ("analyze", "ast", "complexity", "lint"),
+        "dependency_inspector": ("dependenc", "requirements", "imports", "packages used"),
+        "doc_generator": ("docstring", "generate docs", "documentation"),
+        "workspace_indexer": ("index", "symbols", "map the project"),
+        "structured_terminal": ("terminal", "run command", "shell", "ls ", "dir ", "pwd"),
+        "sympy_math": ("solve", "integrate", "derivative", "simplify", "equation", "factor "),
+        "text_stats": ("word count", "how many words", "reading time", "text stats"),
+        "git": ("git", "commit", "branch"),
+    }
+
+    def _curate_tools(self, prompt_text: str) -> list:
+        """Return a small, relevant set of tool names for the model (core +
+        keyword-triggered extras), instead of all 39 — keeps the request small
+        and fast. Bounded so the payload never balloons."""
+        low = (prompt_text or "").lower()
+        names = list(self._CORE_TOOLS)
+        for tool, kws in self._TOOL_TRIGGERS.items():
+            if tool in names:
+                continue
+            if any(k in low for k in kws):
+                names.append(tool)
+        # Hard cap to keep the schema payload bounded.
+        return names[:16]
+
+    def _is_plan_request(self, prompt_text: str) -> bool:
+        """Detect a 'make a plan / improve / review the project' style request."""
+        low = (prompt_text or "").lower()
+        kws = (
+            "make a plan", "improvement list", "list for improvement", "list of improvement",
+            "how to improve", "improve this project", "improve the project", "improve my",
+            "refactor plan", "review the project", "review this project", "plan to improve",
+            "improvement plan", "audit the project", "analyze the project", "assessment of",
+            "suggestions to improve", "make it more professional", "make it better",
+        )
+        return any(k in low for k in kws)
+
+    def _build_code_map(self, workspace_folder: str) -> str:
+        """Build a grounded map of the attached project's REAL source files
+        (path + loc + top symbols) plus a project profile, so plans reference
+        actual files instead of guessing from a flat name listing."""
+        import os
+        import re
+        root = Path(workspace_folder)
+        SKIP_DIRS = {
+            ".git", "__pycache__", "node_modules", "dist", ".venv", ".pytest_cache",
+            "build", "data", ".vscode", ".kimi-memory", "vacuoles", "snapshots",
+            "rollback", "dna", "mcp", "pasted", ".idea", ".mypy_cache", "coverage", ".cache",
+        }
+        SRC_EXT = {".py", ".ts", ".tsx", ".js", ".jsx"}
+        files: list[tuple[str, int, Path]] = []
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+                for fn in filenames:
+                    if os.path.splitext(fn)[1].lower() in SRC_EXT:
+                        fp = Path(dirpath) / fn
+                        try:
+                            files.append((str(fp.relative_to(root)).replace("\\", "/"), fp.stat().st_size, fp))
+                        except OSError:
+                            continue
+                if len(files) > 4000:  # safety cap on huge repos
+                    break
+        except Exception as e:
+            return f"[CODE MAP unavailable: {e}]"
+
+        # Project profile (so the model doesn't mislabel the project).
+        has_pkg = (root / "frontend" / "package.json").exists() or (root / "package.json").exists()
+        has_arch = (root / "cells").is_dir() and (root / "kernel").is_dir()
+        bits = []
+        if has_arch:
+            bits.append("FastAPI + Ollama dual-agent backend (cells/, kernel/, plasma/)")
+        if has_pkg:
+            bits.append("React/Vite web SPA frontend (frontend/src/) — a web app, NOT a CLI")
+        profile = "; ".join(bits) or "general code project"
+
+        def prio(rel: str) -> int:
+            for i, p in enumerate(("cells/", "kernel/", "frontend/src/", "plasma/", "tests/")):
+                if rel.startswith(p):
+                    return i
+            return 9
+
+        files.sort(key=lambda f: (prio(f[0]), -f[1]))
+        top = files[:15]
+        out = [
+            "[CODE MAP — the REAL files of the attached project. Plan ONLY from these.]",
+            f"[PROJECT PROFILE: {profile}]",
+            f"[SOURCE FILES: {len(files)} total; top {len(top)} by importance below]",
+        ]
+        for rel, _size, fp in top:
+            loc, syms = 0, []
+            try:
+                text = fp.read_text(encoding="utf-8", errors="replace")[:40000]
+                loc = text.count("\n") + 1
+                if fp.suffix == ".py":
+                    syms = re.findall(r"^(?:async\s+)?(?:def|class)\s+(\w+)", text, re.M)
+                else:
+                    syms = re.findall(r"(?:export\s+)?(?:function|const|class|interface)\s+(\w+)", text)
+            except Exception:
+                pass
+            sym_s = ", ".join(dict.fromkeys(syms))[:160]
+            out.append(f"- {rel} ({loc} loc)" + (f": {sym_s}" if sym_s else ""))
+        return "\n".join(out)[:6000]
 
     def _native_tool_calls(self, raw) -> list:
         """Convert Ollama /api/chat `message.tool_calls` into the internal

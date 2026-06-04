@@ -4,8 +4,19 @@ Goal: make the dual agents behave like Claude Code — native tools, a real
 agentic loop, streaming, verification, and permission gating — while keeping the
 local/Ollama, one-model-at-a-time constraints.
 
-Approved scope: **P1, P4, P2, P3, P5**. Order: **reliability first** →
-P1 → P4 → P2 → P3, with P5 (permissions) woven in. Status tracked in the task list.
+Approved scope: **P1, P4, P2, P3, P5**.
+
+## Status
+- **P1 Native tool calling** — ✅ DONE (`/api/chat` + tools, hybrid with regex fallback).
+- **P2 Bounded agentic loop** — ✅ DONE (reason→tool→observe, model decides done,
+  native tools + curated schemas, cap 3 iters).
+- **P3 Streaming** — ✅ DONE, and extended to **true token-by-token** streaming
+  (Ollama `stream:true` → SSE `token` events → live panels). See `PLAN_PERSISTENCE.md`
+  for the full Run/streaming/resume/recovery architecture (Phases A–E, all done).
+- **Curated tool schemas + run queue (Phase E)** — ✅ DONE.
+- **Planning Mode** (grounded code map + comprehensive + executable plan) — ✅ DONE.
+- **P4 Plan + verify** — ⏳ pending (auto-run `python_exec` after a `.py` write).
+- **P5 Permission gating (Ask/Auto)** — ⏳ pending.
 
 ## Tool-calling support probe (Ollama 0.24.0, this machine)
 Tested `/api/chat` with a `tools` param:

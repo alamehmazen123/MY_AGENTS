@@ -1,5 +1,13 @@
 # Chat Execution Map — Agent-A Tool Execution Flow
 
+> ⚠️ **PARTIALLY SUPERSEDED.** This describes the original synchronous
+> `/api/prompt` → `/api/generate` flow with regex tool parsing. The current system
+> uses **`/api/run` (async persisted Run) → `/api/chat` (native tools, `stream:true`)
+> → SSE token streaming**, with `_run_turn` as the shared core. Native `tool_calls`
+> are preferred; the regex `[[MCP:...]]` parser is the fallback. See **CLAUDE.md**
+> and **PLAN_PERSISTENCE.md** for the current flow. The MCP execution / workspace-jail
+> details below remain accurate.
+
 ## Overview
 
 This document traces the exact path from `POST /chat` (or `/api/prompt`) to the final LLM response, identifying every file and decision point involved in MCP tool execution.

@@ -4,8 +4,57 @@ import type { PresetName } from '../../stores/settingsStore'
 
 const PRESET_NAMES: PresetName[] = ['CHAT', 'REVIEWING', 'CODING', 'SUPER_CODING', 'EXECUTION', 'CUSTOM']
 
+const TIER_COLOR: Record<string, string> = {
+  'Weak': 'bg-gray-700 text-gray-300',
+  'Moderate': 'bg-sky-900 text-sky-200',
+  'Strong': 'bg-emerald-900 text-emerald-200',
+  'Very Strong': 'bg-purple-900 text-purple-200',
+}
+
+// Capability card shown under each agent's model dropdown.
+function ModelInfo({ model }: { model: string }) {
+  if (!model) return null
+  if (model === '🪄 Auto') {
+    return (
+      <div className="mt-1 rounded border border-purple-700 bg-purple-900/20 p-1.5">
+        <div className="flex flex-wrap gap-1 mb-1">
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-purple-900 text-purple-200">🪄 Auto</span>
+          <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-emerald-900 text-emerald-200">smart routing</span>
+        </div>
+        <p className="text-[10px] text-gray-400 leading-snug">
+          Picks the best installed model for each prompt — fast for chat, strong + native-tools
+          for code/file/plan tasks. Agent-B gets a different model family for sharper review.
+        </p>
+      </div>
+    )
+  }
+  const meta = modelMeta(model)
+  const tools =
+    meta.tools === 'native'
+      ? { label: '✅ native tools', cls: 'bg-emerald-900 text-emerald-200' }
+      : meta.tools === 'text'
+        ? { label: '⚠️ text-only tools', cls: 'bg-amber-900 text-amber-200' }
+        : { label: '? tools untested', cls: 'bg-gray-700 text-gray-400' }
+  const speed =
+    meta.speed === 'fast' ? '⚡ fast'
+      : meta.speed === 'medium' ? '🚶 medium'
+        : meta.speed === 'slow' ? '🐢 slow' : '🐌 very slow'
+  return (
+    <div className="mt-1 rounded border border-gray-700 bg-gray-800/60 p-1.5">
+      <div className="flex flex-wrap gap-1 mb-1">
+        <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium ${TIER_COLOR[meta.tier] || 'bg-gray-700 text-gray-300'}`}>{meta.tier}</span>
+        <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium ${tools.cls}`}>{tools.label}</span>
+        <span className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-gray-700 text-gray-300">{speed}</span>
+      </div>
+      <p className="text-[10px] text-gray-400 leading-snug">{meta.note}</p>
+    </div>
+  )
+}
+
 export function SettingsPanel() {
   const theme = useSettingsStore((s) => s.theme)
+  const permissionMode = useSettingsStore((s) => s.permissionMode)
+  const setPermissionMode = useSettingsStore((s) => s.setPermissionMode)
   const preset = useSettingsStore((s) => s.preset)
   const agentAModel = useSettingsStore((s) => s.agentAModel)
   const agentBModel = useSettingsStore((s) => s.agentBModel)
@@ -122,9 +171,7 @@ export function SettingsPanel() {
               <option key={m} value={m}>{modelLabel(m)}</option>
             ))}
           </select>
-          <span className="text-[10px] text-gray-500 mt-0.5 block">
-            {modelMeta(agentAModel).tier} — {modelMeta(agentAModel).note}
-          </span>
+          <ModelInfo model={agentAModel} />
           {HIGH_RISK_MODELS.includes(agentAModel) && (
             <span className="text-[10px] text-red-400 mt-0.5 block font-medium">⚠️ HIGH RISK — slow on CPU</span>
           )}
@@ -143,14 +190,32 @@ export function SettingsPanel() {
               <option key={m} value={m}>{modelLabel(m)}</option>
             ))}
           </select>
-          {agentBModel && (
-            <span className="text-[10px] text-gray-500 mt-0.5 block">
-              {modelMeta(agentBModel).tier} — {modelMeta(agentBModel).note}
-            </span>
-          )}
+          <ModelInfo model={agentBModel} />
           {agentBModel && HIGH_RISK_MODELS.includes(agentBModel) && (
             <span className="text-[10px] text-red-400 mt-0.5 block font-medium">⚠️ HIGH RISK — slow on CPU</span>
           )}
+        </div>
+
+        <div>
+          <label className="text-xs text-gray-400 block mb-1">Permissions</label>
+          <div className="flex gap-1">
+            {(['auto', 'ask'] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setPermissionMode(m)}
+                className={`flex-1 px-2 py-1 rounded text-xs transition-colors ${
+                  permissionMode === m ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                }`}
+              >
+                {m === 'auto' ? '⚡ Auto' : '🔒 Ask'}
+              </button>
+            ))}
+          </div>
+          <p className="text-[10px] text-gray-500 mt-0.5">
+            {permissionMode === 'auto'
+              ? 'Agents run all tools automatically (current behavior).'
+              : 'Destructive actions (delete / move / overwrite / shell rm / run code) are blocked during autonomous turns. Execute Plan still runs (explicit click).'}
+          </p>
         </div>
 
         <div>

@@ -13,6 +13,11 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
   const messages = agentState?.messages ?? []
   const status = agentState?.status ?? 'online'
   const model = agentState?.model || settingsModel
+  // When 🪄 Auto, show which concrete model the router actually used.
+  const displayModel =
+    model === '🪄 Auto' && agentState?.resolvedModel
+      ? `🪄 ${agentState.resolvedModel}`
+      : model
   const hasAgentResponse = messages.some((m) => m.role === 'agent')
 
   const bgColor = agent === 'A' ? 'bg-purple-50' : 'bg-orange-50'
@@ -54,7 +59,7 @@ export function AgentPanel({ agent, label, role }: { agent: 'A' | 'B'; label: st
             <span className={`w-2 h-2 rounded-full ${statusColor} ${statusDot}`} />
             {statusLabel}
           </div>
-          <div className="opacity-75">{model || '—'}</div>
+          <div className="opacity-75">{displayModel || '—'}</div>
         </div>
       </div>
       <div className="flex-1 overflow-auto p-3 space-y-2">

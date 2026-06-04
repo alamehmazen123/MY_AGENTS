@@ -56,13 +56,34 @@ def make_server(mcp_cell):
     return server
 
 
+import json as _json
+
+
+class _FakeStream:
+    """Async context manager mimicking httpx client.stream() for /api/chat NDJSON."""
+    def __init__(self, lines, status=200):
+        self.status_code = status
+        self._lines = lines
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, *a):
+        pass
+    async def aiter_lines(self):
+        for ln in self._lines:
+            yield ln
+
+
+def _chat_ndjson(content: str, tool_calls=None):
+    return [_json.dumps({"message": {"content": content, "tool_calls": tool_calls}, "done": True})]
+
+
 def make_fake_httpx(response_text: str, tool_calls=None):
     """Return a monkeypatch target that replaces httpx.AsyncClient.
-    Mimics Ollama /api/chat: {"message": {"content", "tool_calls"}}."""
+    Mimics Ollama streaming /api/chat plus plain GET/POST (unload)."""
     class FakeResponse:
         status_code = 200
         def json(self):
-            return {"message": {"content": response_text, "tool_calls": tool_calls}, "done": True}
+            return {"models": [], "done": True}
         def text(self):
             return ""
 
@@ -73,6 +94,8 @@ def make_fake_httpx(response_text: str, tool_calls=None):
             return self
         async def __aexit__(self, *args):
             pass
+        def stream(self, method, url, **kwargs):
+            return _FakeStream(_chat_ndjson(response_text, tool_calls))
         async def post(self, *args, **kwargs):
             return FakeResponse()
         async def get(self, *args, **kwargs):
@@ -224,11 +247,12 @@ async def test_no_tools_flag_disables_forced_detection(monkeypatch):
 
 
 def make_recording_httpx(response_text: str, posts: list):
-    """FakeClient that records every /api/chat payload it receives."""
+    """FakeClient that records the streamed /api/chat payload and the /api/generate
+    unload payload, so tests can assert num_predict, keep_alive, and the unload."""
     class FakeResponse:
         status_code = 200
         def json(self):
-            return {"message": {"content": response_text, "tool_calls": None}, "done": True}
+            return {"models": [], "done": True}
         def text(self):
             return ""
 
@@ -239,10 +263,11 @@ def make_recording_httpx(response_text: str, posts: list):
             return self
         async def __aexit__(self, *args):
             pass
+        def stream(self, method, url, **kwargs):
+            posts.append(kwargs.get("json", {}))
+            return _FakeStream(_chat_ndjson(response_text))
         async def post(self, url, *args, **kwargs):
-            # Record both the main /api/chat call and the final /api/generate
-            # unload so the test can assert the single end-of-turn unload.
-            if "chat" in str(url) or "generate" in str(url):
+            if "generate" in str(url):  # the unload call
                 posts.append(kwargs.get("json", {}))
             return FakeResponse()
         async def get(self, *args, **kwargs):
@@ -365,10 +390,10 @@ async def test_core_instructions_reach_the_model(monkeypatch):
     # System prompt now lives in the first chat message (role=system).
     msgs = posts[0].get("messages", [])
     system = next((m.get("content", "") for m in msgs if m.get("role") == "system"), "")
-    # Distinctive phrases that exist ONLY in core_instructions.md (Karpathy guidelines).
-    assert "Simplicity First" in system, f"core instructions missing from system prompt: {system[:200]}"
-    assert "Surgical Changes" in system
-    assert "Think Before Coding" in system
+    # Distinctive phrases that exist ONLY in core_instructions.md (runtime rules).
+    assert "Core agent instructions" in system, f"core instructions missing: {system[:200]}"
+    assert "NEVER invent data" in system
+    assert "ask the user for clarification" in system
 
 
 @pytest.mark.asyncio
@@ -398,6 +423,98 @@ def test_native_tool_calls_parser():
     assert out[0]["preset"] == "calculator" and out[0]["args"]["expression"] == "2+2"
     assert out[1]["preset"] == "clock" and out[1]["args"]["timezone"] == "Asia/Tokyo"
     assert server._native_tool_calls(None) == []
+
+
+@pytest.mark.asyncio
+async def test_verify_python_writes_pass_and_fail():
+    """P4: a clean .py write verifies ✅; a broken one reports ❌ with the line."""
+    server = make_server(FakeMCPCell())
+    good = {"call": {"preset": "file_explorer", "args": {"action": "write", "path": "a.py", "content": "def f():\n    return 1\n"}},
+            "result": {"path": "a.py"}}
+    bad = {"call": {"preset": "file_explorer", "args": {"action": "write", "path": "b.py", "content": "def f(:\n    return 1\n"}},
+           "result": {"path": "b.py"}}
+    out_good = await server._verify_python_writes(FakeMCPCell(), [good], None)
+    out_bad = await server._verify_python_writes(FakeMCPCell(), [bad], None)
+    assert "✅" in out_good and "a.py" in out_good
+    assert "❌" in out_bad and "b.py" in out_bad and "syntax error" in out_bad
+    # Non-.py writes are ignored.
+    txt = {"call": {"preset": "file_explorer", "args": {"action": "write", "path": "n.txt", "content": "hi"}}, "result": {"path": "n.txt"}}
+    assert await server._verify_python_writes(FakeMCPCell(), [txt], None) == ""
+
+
+def test_is_destructive():
+    server = make_server(FakeMCPCell())
+    assert server._is_destructive("file_explorer", {"action": "delete", "path": "x"})
+    assert server._is_destructive("file_explorer", {"action": "write", "path": "x"})
+    assert server._is_destructive("structured_terminal", {"command": "rm", "target": "x"})
+    assert server._is_destructive("python_exec", {"code": "print(1)"})
+    assert not server._is_destructive("file_explorer", {"action": "read", "path": "x"})
+    assert not server._is_destructive("search_ripgrep", {"query": "x"})
+    assert not server._is_destructive("web_fetch", {"url": "x"})
+
+
+@pytest.mark.asyncio
+async def test_guarded_invoke_blocks_in_ask_mode():
+    mcp = FakeMCPCell()
+    server = make_server(mcp)
+    # Ask mode: a delete is blocked (not executed).
+    out = await server._guarded_invoke(mcp, "file_explorer", {"action": "delete", "path": "x"}, None, "ask")
+    assert out.get("error") == "requires_permission"
+    assert not any(i[0] == "file_explorer" for i in mcp.invocations), "destructive call must NOT run in ask mode"
+    # Ask mode: a read still runs.
+    await server._guarded_invoke(mcp, "file_explorer", {"action": "list", "path": "."}, None, "ask")
+    assert any(i[0] == "file_explorer" for i in mcp.invocations)
+    # Auto mode: delete runs.
+    mcp.invocations.clear()
+    await server._guarded_invoke(mcp, "file_explorer", {"action": "delete", "path": "x"}, None, "auto")
+    assert any(i[1].get("action") == "delete" for i in mcp.invocations)
+
+
+def test_is_plan_request():
+    server = make_server(FakeMCPCell())
+    assert server._is_plan_request("make a list for improvement of coding for this project")
+    assert server._is_plan_request("how to improve the project")
+    assert server._is_plan_request("review this project and suggest changes")
+    assert not server._is_plan_request("what is the weather today")
+    assert not server._is_plan_request("read todo.txt")
+
+
+def test_build_code_map_grounds_on_real_files(tmp_path):
+    """Planning code map lists real source files + a correct project profile."""
+    (tmp_path / "cells").mkdir()
+    (tmp_path / "cells" / "engine.py").write_text("def run():\n    return 1\n\nclass Engine:\n    pass\n", encoding="utf-8")
+    (tmp_path / "kernel").mkdir()
+    (tmp_path / "kernel" / "main.py").write_text("def boot():\n    pass\n", encoding="utf-8")
+    fe = tmp_path / "frontend"
+    fe.mkdir()
+    (fe / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "junk.js").write_text("x", encoding="utf-8")
+
+    server = make_server(FakeMCPCell())
+    cmap = server._build_code_map(str(tmp_path))
+    assert "cells/engine.py" in cmap
+    assert "kernel/main.py" in cmap
+    assert "run" in cmap and "Engine" in cmap          # symbols extracted
+    assert "NOT a CLI" in cmap                          # correct web-app profile
+    assert "node_modules" not in cmap                   # scratch excluded
+
+
+def test_curate_tools_is_bounded_and_relevant():
+    """E: tool schemas are curated to a small relevant set, not all 39."""
+    server = make_server(FakeMCPCell())
+    # Plain prompt → just the core set.
+    core = server._curate_tools("say hello")
+    assert "file_explorer" in core and "calculator" in core
+    assert "weather" not in core and "pdf_extract" not in core
+    assert len(core) <= 16
+    # Intent keyword pulls in the matching tool.
+    weather = server._curate_tools("what's the weather forecast in Paris?")
+    assert "weather" in weather
+    pdf = server._curate_tools("extract text from report.pdf")
+    assert "pdf_extract" in pdf
+    # Always bounded.
+    assert len(server._curate_tools("git weather pdf sql csv qr arxiv convert refactor dns html cpu scaffold rollback")) <= 16
 
 
 def test_resolve_workspace(tmp_path):
