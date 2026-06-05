@@ -135,6 +135,7 @@ export const ALL_MODELS = [
   'qwen3:4b',
   'qwen3:8b',
   'cogito:8b',
+  'llama3.2:3b',
   'qwen2.5-coder:3b',
   'qwen2.5-coder:14b',
   'deepseek-coder:1.3b',
@@ -171,6 +172,8 @@ const MODEL_NOTES: Record<string, ModelMeta> = {
     note: '1.3B coder. Fast for short snippets. No native tool-calling — weak on agent/file tasks.' },
   'qwen2.5-coder:3b': { tier: 'Moderate', tools: 'text', speed: 'fast',
     note: '3B coder. Fast, decent everyday code. ⚠️ No native tool-calling — slower & less reliable on file/tool tasks.' },
+  'llama3.2:3b': { tier: 'Moderate', tools: 'native', speed: 'fast',
+    note: '3B Meta model. ✅ Native tool-calling (args occasionally imperfect). Fast all-rounder for chat + light tool tasks.' },
   'qwen3:4b': { tier: 'Moderate', tools: 'native', speed: 'medium',
     note: '4B. ✅ Native tool-calling. Good balanced Agent-A for tool tasks; can be chatty.' },
   'qwen3:8b': { tier: 'Strong', tools: 'native', speed: 'medium',
@@ -235,8 +238,8 @@ function classifyIntent(prompt: string, hasFolder: boolean): Intent {
 const familyOf = (m: string) => (m || '').split(':')[0]
 
 // Preference orders (best first) per use-case; filtered by what's installed.
-const PREF_TOOL = ['qwen3:8b', 'cogito:8b', 'qwen3:4b', 'qwen2.5-coder:7b', 'qwen2.5-coder:14b', 'llama3:8b', 'qwen2.5-coder:3b']
-const PREF_CHAT = ['qwen3:1.7b', 'qwen2.5-coder:3b', 'qwen3:4b', 'llama3:8b', 'qwen3:8b']
+const PREF_TOOL = ['qwen3:8b', 'cogito:8b', 'qwen3:4b', 'llama3.2:3b', 'qwen2.5-coder:7b', 'qwen2.5-coder:14b', 'llama3:8b', 'qwen2.5-coder:3b']
+const PREF_CHAT = ['llama3.2:3b', 'qwen3:1.7b', 'qwen2.5-coder:3b', 'qwen3:4b', 'llama3:8b', 'qwen3:8b']
 const PREF_REVIEWER = ['cogito:8b', 'qwen3:8b', 'deepseek-coder:6.7b', 'qwen2.5-coder:7b', 'llama3:8b', 'qwen2.5-coder:14b', 'qwen3:4b']
 
 function firstInstalled(pref: string[], installed: string[], avoidFamily?: string): string | undefined {

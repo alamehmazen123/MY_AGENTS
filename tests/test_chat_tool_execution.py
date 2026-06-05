@@ -49,6 +49,9 @@ class FakeMCPCell:
             {"name": "python_exec", "description": "Run Python"},
         ]
 
+    def ollama_tools(self, names=None):
+        return []
+
 
 def make_server(mcp_cell):
     gateway = FakeGateway(mcp_cell=mcp_cell)
@@ -442,6 +445,25 @@ async def test_verify_python_writes_pass_and_fail():
     assert await server._verify_python_writes(FakeMCPCell(), [txt], None) == ""
 
 
+@pytest.mark.asyncio
+async def test_never_empty_output_when_model_only_tool_calls(monkeypatch):
+    """Regression: a model that only emits tool calls and never text (e.g.
+    llama3.2:3b spamming web_fetch) must NOT yield an empty '[No response]'."""
+    mcp = FakeMCPCell()
+    server = make_server(mcp)
+    native = [{"function": {"name": "file_explorer", "arguments": {"action": "list", "path": "."}}}]
+    # content '' on every call → model never produces text.
+    monkeypatch.setattr("httpx.AsyncClient", make_fake_httpx("", tool_calls=native))
+
+    class FakeReq:
+        async def json(self):
+            return {"prompt": "do something with tools", "model": "dummy", "no_tools": False}
+
+    result = await server._handle_prompt(FakeReq())
+    assert result["output"].strip(), "output must never be blank"
+    assert "no written answer" in result["output"], result["output"][:120]
+
+
 def test_is_destructive():
     server = make_server(FakeMCPCell())
     assert server._is_destructive("file_explorer", {"action": "delete", "path": "x"})
@@ -451,6 +473,35 @@ def test_is_destructive():
     assert not server._is_destructive("file_explorer", {"action": "read", "path": "x"})
     assert not server._is_destructive("search_ripgrep", {"query": "x"})
     assert not server._is_destructive("web_fetch", {"url": "x"})
+
+
+@pytest.mark.asyncio
+async def test_guarded_invoke_refuses_broken_python():
+    """Gather→implement safety: syntactically-broken .py writes are refused."""
+    mcp = FakeMCPCell()
+    server = make_server(mcp)
+    out = await server._guarded_invoke(
+        mcp, "file_explorer", {"action": "write", "path": "x.py", "content": "def f(:\n  pass\n"}, None, "auto")
+    assert out.get("error") == "syntax_error"
+    assert not mcp.invocations, "broken python must NOT be written"
+    # Valid python passes through.
+    await server._guarded_invoke(
+        mcp, "file_explorer", {"action": "write", "path": "y.py", "content": "def f():\n    return 1\n"}, None, "auto")
+    assert any(i[1].get("path") == "y.py" for i in mcp.invocations)
+
+
+@pytest.mark.asyncio
+async def test_guarded_invoke_refuses_truncated_rewrite(tmp_path):
+    """A much-smaller rewrite of an existing .py (likely truncation) is refused."""
+    big = tmp_path / "big.py"
+    big.write_text("# header\n" + "\n".join(f"def f{i}():\n    return {i}" for i in range(80)), encoding="utf-8")
+    mcp = FakeMCPCell()
+    server = make_server(mcp)
+    out = await server._guarded_invoke(
+        mcp, "file_explorer", {"action": "write", "path": "big.py", "content": "def f0():\n    return 0\n"},
+        str(tmp_path), "auto")
+    assert out.get("error") == "truncation_guard"
+    assert not mcp.invocations, "truncated rewrite must NOT overwrite the file"
 
 
 @pytest.mark.asyncio

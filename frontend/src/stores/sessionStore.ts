@@ -560,6 +560,52 @@ export const useSessionStore = create<SessionState>((set, get) => {
           }))
         }
 
+        // ── PASS 3 (gather → implement) ──
+        // If PASS 1 only READ files (a plan's gather phase), feed the real file
+        // contents back and ask the agent to produce + APPLY the edits. Safety is
+        // enforced by the backend: Ask mode blocks writes; syntactically-broken or
+        // truncated Python is refused pre-write; every .py is compile-checked (P4).
+        const isGather = steps.length > 0 && steps.every((s) =>
+          s.tool === 'search_ripgrep' ||
+          (s.tool === 'file_explorer' && ['read', 'list', 'stat'].includes(s.args?.action))
+        )
+        const gathered = steps
+          .filter((s) => s.tool === 'file_explorer' && s.args?.action === 'read' && s.result?.content)
+          .map((s) => `=== ${s.args.path} ===\n${String(s.result.content).slice(0, 4000)}`)
+          .join('\n\n')
+
+        if (isGather && gathered) {
+          set({ unloadStatus: 'Implementing plan — generating & applying edits…' })
+          const rawExec = agent === 'A' ? session.agentA.model || settings.agentAModel : session.agentB.model || settings.agentBModel
+          const model = pickModel(rawExec, originalRequest || 'implement plan', agent, settings.availableModels, true)
+          const implPrompt =
+            `ORIGINAL REQUEST:\n"""${originalRequest}"""\n\n` +
+            `You already READ these files:\n${truncate(gathered, 9000)}\n\n` +
+            `Now IMPLEMENT the improvements. For EACH file you change, emit a tool call with the FULL corrected file content:\n` +
+            `[[MCP:file_explorer:{"action":"write","path":"<relative path>","content":"<complete new file content>"}]]\n` +
+            `RULES: change only what the plan requires; reproduce each file COMPLETELY (no truncation, no "...rest unchanged" placeholders); ` +
+            `if you cannot safely reproduce a whole large file, make a small targeted change or skip it. Paths are relative to the workspace.`
+          const implSystem =
+            'You are an execution agent applying concrete code edits via [[MCP:file_explorer:write]] calls with COMPLETE file content. ' +
+            'Never truncate a file or use placeholders. Broken or truncated Python will be refused by the system.'
+          const r = await callOllama(implPrompt, model, implSystem, {
+            workspaceFolder: session.workspaceFolder,
+            enableTools: true,
+            temperature: 0.1,
+            contextLength: settings.contextLength,
+            agent,
+          })
+          const implSteps = toSteps((r.toolResults || []).map((tr: any) => ({ tool: tr.tool, args: tr.args, result: tr.result })))
+          steps = steps.concat(implSteps)
+          set((s) => ({
+            sessions: s.sessions.map((sess) =>
+              sess.id === s.activeSessionId
+                ? { ...sess, [agent === 'A' ? 'agentA' : 'agentB']: { ...(agent === 'A' ? sess.agentA : sess.agentB), messages: [...(agent === 'A' ? sess.agentA : sess.agentB).messages, { id: makeId(), role: 'agent', text: '**Implementing plan**\n\n' + r.text, timestamp: Date.now() }] } }
+                : sess
+            ),
+          }))
+        }
+
         setResult({ agent, steps, summary: buildSummary(steps, data.status, data.error) })
       } catch (e: any) {
         setResult({ agent, steps: [], summary: `⚠️ Execution failed: ${e.message}` })

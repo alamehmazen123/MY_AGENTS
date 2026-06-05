@@ -1002,6 +1002,42 @@ class RESTServer:
                     # After first turn, simplify system prompt
                     full_system = system + "\nContinue based on the tool results. Do not use more tools unless necessary."
 
+            # If the model only ever emitted tool calls and never produced text
+            # (common with small native-tool models like llama3.2:3b), force ONE
+            # final answer with tools OFF so the user never gets an empty response.
+            if not final_response.strip() and any_tool_executed:
+                logger.info("[TOOL_TRACE] forcing_final_answer tools_only_no_text")
+                try:
+                    ctx = ""
+                    for tr in all_tool_results[-6:]:
+                        ctx += f"- {tr['call']['preset']}: {json.dumps(tr['result'])[:800]}\n"
+                    force_msgs = [
+                        {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"{base_prompt}\n\nTOOL RESULTS:\n{ctx}\n\n"
+                         "Now write the COMPLETE final answer in markdown. Do NOT call any tools."},
+                    ]
+                    fpayload = {
+                        "model": model, "messages": force_msgs, "stream": False,
+                        "keep_alive": "5m", "options": {"num_predict": body.get("max_tokens", 1536)},
+                    }
+                    if any(t in model.lower() for t in ("qwen3", "-r1", "r1:", "gpt-oss")):
+                        fpayload["think"] = False
+                    async with httpx.AsyncClient(timeout=900) as fclient:
+                        fr = await fclient.post(f"{settings.ollama_host}/api/chat", json=fpayload, timeout=900)
+                        if fr.status_code == 200:
+                            final_response = ((fr.json().get("message") or {}).get("content") or "").strip()
+                except Exception as _fe:
+                    logger.info("[TOOL_TRACE] force_final_answer_failed=%s", _fe)
+
+            # Last-resort: never return a blank answer.
+            if not final_response.strip():
+                final_response = (
+                    "[The model ran tools but produced no written answer — it is likely too small "
+                    "for this task. Switch Agent-A to 🪄 Auto or a Strong model (qwen3:8b / cogito:8b) "
+                    "and retry.]" if any_tool_executed else
+                    "[The model returned an empty response. Try again or pick a different model.]"
+                )
+
         except httpx.ConnectError as e:
             logger.info("stage=G ollama_connect_error")
             recorder.record_failure("ollama_connect_error", e, {"model": model})
@@ -1198,8 +1234,9 @@ class RESTServer:
         return ""
 
     async def _guarded_invoke(self, mcp_cell, preset, args, workspace, permission_mode):
-        """Invoke a tool, but in 'ask' mode refuse destructive actions with a
-        clear, structured result instead of executing them."""
+        """Invoke a tool, but: (1) in 'ask' mode refuse destructive actions, and
+        (2) ALWAYS refuse to write syntactically-broken Python (safe-by-construction
+        for the gather→implement flow — broken code never lands on disk)."""
         if permission_mode == "ask":
             desc = self._is_destructive(preset, args)
             if desc:
@@ -1211,6 +1248,42 @@ class RESTServer:
                     "blocked_action": desc,
                     "preset": preset,
                 }
+        a = args or {}
+        if preset == "file_explorer" and a.get("action") == "write" and str(a.get("path", "")).endswith(".py"):
+            content = a.get("content", "")
+            path = str(a.get("path", ""))
+            # (a) never write syntactically-broken Python
+            try:
+                compile(content, path, "exec")
+            except SyntaxError as e:
+                logger.info("[TOOL_TRACE] write_refused_syntax path=%s", path)
+                return {
+                    "error": "syntax_error",
+                    "message": f"Refused to write {path}: Python syntax error at "
+                               f"line {e.lineno}: {e.msg}. The file was NOT changed.",
+                    "preset": preset,
+                }
+            except Exception:
+                pass
+            # (b) never silently overwrite a real file with a much smaller (likely
+            # truncated) rewrite — a model can't reliably reproduce a large file.
+            try:
+                p = Path(path)
+                if not p.is_absolute() and workspace:
+                    p = Path(workspace) / path
+                if p.exists():
+                    existing = p.stat().st_size
+                    if existing > 400 and len(content.encode("utf-8")) < existing * 0.6:
+                        logger.info("[TOOL_TRACE] write_refused_truncation path=%s", path)
+                        return {
+                            "error": "truncation_guard",
+                            "message": f"Refused to write {path}: the new content ({len(content)} chars) is "
+                                       f"much smaller than the existing file — likely a truncated rewrite. "
+                                       f"Make a smaller targeted change instead. The file was NOT changed.",
+                            "preset": preset,
+                        }
+            except Exception:
+                pass
         return await mcp_cell.invoke(preset, args, workspace=workspace)
 
     async def _verify_python_writes(self, mcp_cell, tool_results: list, workspace_folder) -> str:
