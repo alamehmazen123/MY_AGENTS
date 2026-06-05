@@ -1402,20 +1402,31 @@ class RESTServer:
             f"[PROJECT PROFILE: {profile}]",
             f"[SOURCE FILES: {len(files)} total; top {len(top)} by importance below]",
         ]
-        for rel, _size, fp in top:
-            loc, syms = 0, []
+        excerpts = []  # real code from the most important files → specific, grounded plans
+        for idx, (rel, _size, fp) in enumerate(top):
+            loc, syms, head = 0, [], ""
             try:
-                text = fp.read_text(encoding="utf-8", errors="replace")[:40000]
+                text = fp.read_text(encoding="utf-8", errors="replace")
                 loc = text.count("\n") + 1
+                scan = text[:40000]
                 if fp.suffix == ".py":
-                    syms = re.findall(r"^(?:async\s+)?(?:def|class)\s+(\w+)", text, re.M)
+                    syms = re.findall(r"^(?:async\s+)?(?:def|class)\s+(\w+)", scan, re.M)
                 else:
-                    syms = re.findall(r"(?:export\s+)?(?:function|const|class|interface)\s+(\w+)", text)
+                    syms = re.findall(r"(?:export\s+)?(?:function|const|class|interface)\s+(\w+)", scan)
+                # Keep a short real excerpt of the top 6 files so the plan is
+                # grounded in ACTUAL code, not just file names/symbols.
+                if idx < 6:
+                    head = "\n".join(text.splitlines()[:24])
             except Exception:
                 pass
-            sym_s = ", ".join(dict.fromkeys(syms))[:160]
+            sym_s = ", ".join(dict.fromkeys(syms))[:200]
             out.append(f"- {rel} ({loc} loc)" + (f": {sym_s}" if sym_s else ""))
-        return "\n".join(out)[:6000]
+            if head:
+                excerpts.append(f"\n----- {rel} (first lines) -----\n{head}")
+        result = "\n".join(out)
+        if excerpts:
+            result += "\n\n[CODE EXCERPTS — real code from the key files; ground your plan in THESE]\n" + "\n".join(excerpts)
+        return result[:9000]
 
     def _native_tool_calls(self, raw) -> list:
         """Convert Ollama /api/chat `message.tool_calls` into the internal
